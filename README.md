@@ -1,11 +1,19 @@
 # Wisp
 
+English | [简体中文](README.zh-CN.md)
+
 A portable, single-exe Windows cleaner with an English and Chinese interface. Rust, Slint (femtovg renderer), liquid-glass look.
 
 - Cleans junk files, finds stale registry entries, manages startup items and installed programs, maps disk usage, and offers a few Windows tweaks.
 - Safety first: nothing is deleted until you confirm, registry fixes are backed up, and every optional recording feature (log, history, remembered settings, restore point, low-disk reminder) is off by default.
 - Idle cost is zero: no background service, no timers while nothing happens.
 - Adapts to the processor (`src/engine/cpu.rs`): scan threads follow the logical CPU count, hashing follows the fast physical cores, scans you wait for run below normal priority with high QoS, and background hashing runs in EcoQoS. Threads are never pinned, so Windows and the AMD and Intel drivers keep core placement.
+
+## Download
+
+Get `Wisp-x.y.z-win-x64.zip` from [Releases](https://github.com/sriaro/wisp/releases), unzip it anywhere and run `Wisp.exe`. There is no installer.
+
+The exe is not code-signed, so Windows SmartScreen may warn on the first run. Compare the SHA-256 on the release page with your download.
 
 ## Build
 
@@ -56,7 +64,7 @@ cd tools/make-assets && cargo run --release -- ../../assets ../../ui/art
 
 ## Data
 
-Wisp keeps backups, settings, history and the log in a `data` folder next to `Wisp.exe` by default; the folder can be moved from the Backups page. The `data` folder is never part of the source tree.
+Wisp keeps backups, settings, history and the log in a `data` folder next to `Wisp.exe` by default; the folder can be moved from the Backups page. If the exe sits in a temporary folder (for example when run straight from a zip), the data goes to `%LOCALAPPDATA%\Wisp` instead, so temp cleaning cannot remove it. The `data` folder is never part of the source tree.
 
 ## Licence
 
