@@ -5,12 +5,12 @@ English | [简体中文](README.zh-CN.md)
 <details>
 <summary><b>简体中文（点击展开）</b></summary>
 
-便携的单文件 Windows 清理工具，界面支持中文和英文。
+一款绿色便携的 Windows 清理工具，只有一个 exe，界面支持中文和英文。
 
-- 清理垃圾文件，查找失效的注册表项，管理启动项和已安装程序，分析磁盘占用，并提供少量 Windows 调整。
-- 安全优先：确认之前不会删除任何东西，注册表修复会先备份，所有可选的记录功能默认关闭。
-- 空闲时零开销：无后台服务，空闲时也没有定时器。
-- 下载：到 [Releases](https://github.com/sriaro/wisp/releases) 下载 zip，解压后运行 `Wisp.exe`，不需要安装。
+- 清理垃圾文件，查找失效的注册表项，管理启动项和已安装的程序，分析磁盘占用，还提供一些常用的 Windows 小调整。
+- 安全第一：没有你的确认，什么都不会删；修复注册表之前会先备份；所有可选的记录功能默认都是关闭的。
+- 空闲时零开销：没有后台服务，不用的时候也不占 CPU。
+- 下载：到 [Releases](https://github.com/sriaro/wisp/releases) 下载 zip，解压后双击运行 `Wisp.exe`，不需要安装。
 
 完整中文说明见 [README.zh-CN.md](README.zh-CN.md)。
 
@@ -20,7 +20,7 @@ A portable, single-exe Windows cleaner with an English and Chinese interface. Ru
 
 - Cleans junk files, finds stale registry entries, manages startup items and installed programs, maps disk usage, and offers a few Windows tweaks.
 - Safety first: nothing is deleted until you confirm, registry fixes are backed up, and every optional recording feature (log, history, remembered settings, restore point, low-disk reminder) is off by default.
-- Idle cost is zero: no background service, no timers while nothing happens.
+- Idle cost is zero: no background service, and no CPU use while you are not using it.
 - Adapts to the processor (`src/engine/cpu.rs`): scan threads follow the logical CPU count, hashing follows the fast physical cores, scans you wait for run below normal priority with high QoS, and background hashing runs in EcoQoS. Threads are never pinned, so Windows and the AMD and Intel drivers keep core placement.
 
 ## Download
