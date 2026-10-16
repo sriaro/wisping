@@ -62,6 +62,10 @@ Wisp keeps backups, settings, history and the log in a `data` folder next to `Wi
 
 Wisp is free software under the GNU General Public License version 3 only; see `LICENSE`. It is built on Slint, used under its GPL-3.0 option.
 
+Wisp is provided without any warranty (see sections 15 and 16 of the licence). It deletes files and edits the registry only after you confirm; back up anything you cannot lose.
+
+Every crate compiled into the exe, with its licence, is listed in `THIRD-PARTY.md`.
+
 Third-party parts:
 
 - `third_party/femtovg` is femtovg 0.27.0 (MIT or Apache-2.0) with local changes; its licence files are kept in that folder.
