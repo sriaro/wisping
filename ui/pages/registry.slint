@@ -1,0 +1,177 @@
+import { Theme, T, AppState, IssueItem } from "../theme.slint";
+import { Glass, Pill, PrimaryButton, SecondaryButton, RoundCheck, ListGroup, ProgressStrip } from "../widgets.slint";
+import { PageFrame, PageHead, EmptyState } from "common.slint";
+import { Intro, Rise } from "../motion.slint";
+
+component IssueRow inherits Rise {
+    in property <IssueItem> item;
+    in property <bool> last: false;
+    in property <bool> shown: true;
+    callback activated;
+    height: 56px;
+    visible: shown;
+
+    Rectangle {
+        x: 6px;
+        y: 3px;
+        width: parent.width - 12px;
+        height: parent.height - 6px;
+        border-radius: 11px;
+        background: ta.has-hover ? Theme.hover : Theme.hover.transparentize(1);
+        opacity: root.v;
+        animate background { duration: 140ms; }
+    }
+
+    if !root.last: Rectangle {
+        x: 50px;
+        y: parent.height - 1px;
+        width: parent.width - 50px - 14px;
+        height: 1px;
+        background: Theme.sep.transparentize(1 - root.v);
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 13px;
+        RoundCheck {
+            fade: root.v;
+            checked: root.item.selected;
+            enabled: !root.item.locked;
+            y: (parent.height - self.height) / 2;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            horizontal-stretch: 1;
+            Text {
+                opacity: root.v;
+                text: root.item.title;
+                color: Theme.text;
+                font-size: 11.5px;
+                font-weight: Theme.semi;
+                font-family: "Consolas";
+                overflow: elide;
+            }
+            Text {
+                opacity: root.v;
+                text: root.item.detail;
+                color: Theme.text-dim;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+        if root.item.locked: Pill {
+            fade: root.v;
+            text: T.s("badge.admin");
+            fg: Theme.warn;
+            bg: Theme.warn-soft;
+            y: (parent.height - self.height) / 2;
+        }
+        Pill {
+            fade: root.v;
+            text: root.item.kind-name;
+            fg: Theme.tint-fg(root.item.tint);
+            bg: Theme.tint-bg(root.item.tint);
+            y: (parent.height - self.height) / 2;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: root.item.locked ? default : pointer;
+        clicked => {
+            root.activated();
+        }
+    }
+}
+
+export component RegistryPage inherits PageFrame {
+    VerticalLayout {
+        spacing: 14.5px;
+        PageHead {
+            title: T.s("reg.title");
+            sub: T.s("reg.sub");
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            if AppState.issues.length > 0: lg := ListGroup {
+                limit: parent.height;
+                width: parent.width;
+                for item[i] in AppState.issues: IssueRow {
+                    order: i;
+                    shown: self.absolute-position.y + self.height > lg.absolute-position.y && self.absolute-position.y < lg.absolute-position.y + lg.height;
+                    item: item;
+                    last: i == AppState.issues.length - 1;
+                    activated => {
+                        AppState.toggle-issue(i);
+                    }
+                }
+            }
+            if AppState.issues.length == 0: EmptyState {
+                icon: AppState.reg-scanned ? "shield" : "database";
+                title: AppState.reg-scanned ? T.s("reg.empty.none") : T.s("reg.empty.idle");
+                sub: AppState.reg-scanned ? T.s("reg.empty.none.sub") : T.s("reg.empty.idle.sub");
+            }
+        }
+        Glass {
+            height: 57.5px;
+            radius: 17.5px;
+            strong: true;
+            HorizontalLayout {
+                padding-left: 21px;
+                padding-right: 11px;
+                spacing: 9.5px;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 5px;
+                    horizontal-stretch: 1;
+                    Text {
+                        opacity: Theme.page-a;
+                        text: AppState.busy ? AppState.status : (AppState.reg-scanned ? AppState.reg-count-text + "  ·  " + AppState.reg-selected-text : T.s("reg.note"));
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: Theme.semi;
+                        overflow: elide;
+                    }
+                    ProgressStrip {
+                        active: AppState.busy;
+                    }
+                }
+                SecondaryButton {
+                    icon: "archive";
+                    text: T.s("btn.backups");
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.open-backups();
+                    }
+                }
+                SecondaryButton {
+                    text: T.s("select.all");
+                    enabled: AppState.issues.length > 0 && !AppState.busy;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.select-all-issues();
+                    }
+                }
+                SecondaryButton {
+                    text: T.s("btn.scan");
+                    icon: "search";
+                    enabled: !AppState.busy;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.scan-reg();
+                    }
+                }
+                PrimaryButton {
+                    text: T.s("btn.fix");
+                    icon: "wrench";
+                    enabled: !AppState.busy && AppState.can-fix;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.fix-reg();
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,598 @@
+import { Theme, T } from "../theme.slint";
+import { Glass, Pill, PrimaryButton, SecondaryButton, ListGroup, ProgressStrip, SegTabs, Sq } from "../widgets.slint";
+import { PageFrame, EmptyState } from "common.slint";
+import { Intro, FadeText } from "../motion.slint";
+
+export struct TileItem {
+    idx: int,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    name: string,
+    size: string,
+    tint: int,
+    kind: int,
+    selected: bool,
+    nested: bool,
+}
+
+export struct DiskRow {
+    idx: int,
+    title: string,
+    sub: string,
+    size: string,
+    frac: float,
+    tint: int,
+    kind: int,
+}
+
+export struct LegendItem {
+    tint: int,
+    name: string,
+    size: string,
+}
+
+export global DiskState {
+    in-out property <[string]> locations: [];
+    in-out property <int> location: 0;
+    in-out property <[string]> crumbs: [];
+    in-out property <[TileItem]> tiles: [];
+    in-out property <[int]> epoch: [0];
+    in-out property <[int]> list-epoch: [0];
+    in-out property <[DiskRow]> rows: [];
+    in-out property <[LegendItem]> legend: [];
+    in-out property <int> list-mode: 0;
+    in-out property <bool> has-tree: false;
+    in-out property <bool> scanning: false;
+    in-out property <string> status;
+    in-out property <string> folder-text;
+    in-out property <string> hover-text;
+    in-out property <bool> sel-valid: false;
+    in-out property <string> sel-title;
+    in-out property <string> sel-path;
+    in-out property <string> sel-meta;
+    in-out property <string> sel-type;
+    in-out property <int> sel-tint: 7;
+    in-out property <string> sel-owner;
+    in-out property <string> sel-copies;
+    in-out property <bool> sel-dir: false;
+    in-out property <string> list-back;
+    callback choose-location(int);
+    callback scan();
+    callback cancel();
+    callback crumb(int);
+    callback tile-click(int);
+    callback tile-open(int);
+    callback tile-hover(int);
+    callback row-click(int);
+    callback row-open(int);
+    callback set-list-mode(int);
+    callback area-changed(float, float);
+    callback open-selected();
+    callback reveal-selected();
+    callback show-copies();
+    callback show-owner();
+    callback go-back();
+}
+
+component TileView inherits Rectangle {
+    in property <TileItem> t;
+    in property <length> aw;
+    in property <length> ah;
+    x: t.x * aw;
+    y: t.y * ah;
+    width: t.w * aw;
+    height: t.h * ah;
+    property <color> base: Theme.tint-fg(t.tint);
+    property <bool> corner: (t.x <= 0.001 || t.x + t.w >= 0.999) && (t.y <= 0.001 || t.y + t.h >= 0.999);
+    property <float> alpha: t.nested ? 0.20 : (t.kind == 2 ? 0.30 : (t.kind == 3 ? 0.20 : (ta.pressed ? 1.0 : (ta.has-hover || t.selected ? 0.95 : 0.82))));
+    property <length> inset: ta.pressed ? min(4px, min(root.width, root.height) / 4) : (t.selected ? 0.5px : 1.5px);
+    animate inset { duration: 240ms; easing: spring(0); }
+
+    Rectangle {
+        x: root.inset;
+        y: root.inset;
+        width: parent.width - 2 * root.inset;
+        height: parent.height - 2 * root.inset;
+
+        Sq {
+            r: root.corner && min(parent.width, parent.height) >= 56px ? 13 : min(8, min(parent.width, parent.height) / 1px / 4);
+            colorize: @linear-gradient(160deg, root.base.brighter(0.18).with-alpha(root.alpha) 0%, root.base.with-alpha(root.alpha) 100%);
+            edge: root.t.selected ? Theme.text : root.base.with-alpha(0.55);
+            edge-width: root.t.selected ? 2.5px : (root.t.nested ? 1px : 0px);
+            animate edge-width { duration: 200ms; easing: ease-out; }
+            animate edge { duration: 200ms; }
+            animate colorize { duration: 160ms; }
+        }
+
+        if self.width > 66px && self.height > 32px && !root.t.nested: VerticalLayout {
+            padding: 8px;
+            spacing: 1px;
+            Text {
+                text: root.t.name;
+                color: root.t.kind >= 2 ? Theme.text-dim : #ffffff;
+                font-size: 12px;
+                font-weight: 700;
+                overflow: elide;
+            }
+            if parent.height > 52px: Text {
+                text: root.t.size;
+                color: root.t.kind >= 2 ? Theme.text-dim : #ffffffd0;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+        if root.t.nested: Text {
+            x: 8px;
+            y: 4px;
+            width: parent.width - 16px;
+            height: 16px;
+            text: root.t.name + "   " + root.t.size;
+            color: Theme.text;
+            font-size: 11.5px;
+            font-weight: 700;
+            overflow: elide;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.t.idx >= 0;
+        mouse-cursor: root.t.idx >= 0 ? MouseCursor.pointer : MouseCursor.default;
+        changed has-hover => {
+            DiskState.tile-hover(self.has-hover ? root.t.idx : -1);
+        }
+        clicked => {
+            DiskState.tile-click(root.t.idx);
+        }
+        double-clicked => {
+            DiskState.tile-open(root.t.idx);
+        }
+    }
+}
+
+component RowView inherits Rectangle {
+    in property <DiskRow> r;
+    in property <bool> last: false;
+    in property <int> order: 0;
+    in property <bool> settled: false;
+    height: 46px;
+    row-intro := Intro {
+        order: root.order;
+        done: root.settled;
+    }
+
+    if !root.last: Rectangle {
+        x: 14px;
+        y: parent.height - 1px;
+        width: parent.width - 28px;
+        height: 1px;
+        background: Theme.sep.transparentize(1 - Theme.page-a);
+    }
+
+    Rectangle {
+        x: 0px;
+        width: parent.width * root.r.frac * row-intro.v;
+        height: parent.height;
+        background: Theme.tint-fg(root.r.tint).with-alpha(0.10 * Theme.page-a);
+    }
+
+    Rectangle {
+        opacity: Theme.page-a;
+        background: ta.has-hover ? Theme.hover : transparent;
+    }
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 12px;
+        spacing: 9px;
+        Rectangle {
+            width: 8px;
+            height: 8px;
+            border-radius: 4px;
+            background: Theme.tint-fg(root.r.tint).transparentize(1 - Theme.page-a);
+            y: (parent.height - self.height) / 2;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 1px;
+            horizontal-stretch: 1;
+            Text {
+                opacity: Theme.page-a;
+                text: root.r.title;
+                color: Theme.text;
+                font-size: 12.5px;
+                font-weight: Theme.semi;
+                overflow: elide;
+            }
+            Text {
+                opacity: Theme.page-a;
+                text: root.r.sub;
+                color: Theme.text-dim;
+                font-size: 10.5px;
+                overflow: elide;
+            }
+        }
+        Text {
+            opacity: Theme.page-a;
+            text: root.r.size;
+            color: Theme.text;
+            font-size: 11.5px;
+            font-weight: Theme.semi;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            DiskState.row-click(root.r.idx);
+        }
+        double-clicked => {
+            DiskState.row-open(root.r.idx);
+        }
+    }
+}
+
+component Crumbs inherits Rectangle {
+    height: 24px;
+    HorizontalLayout {
+        spacing: 2px;
+        alignment: start;
+        for c[i] in DiskState.crumbs: HorizontalLayout {
+            spacing: 2px;
+            if i > 0: Text {
+                opacity: Theme.page-a;
+                text: "›";
+                color: Theme.text-dim;
+                font-size: 13px;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                width: label.preferred-width + 14px;
+                Rectangle {
+                    border-radius: 8px;
+                    opacity: Theme.page-a;
+                    background: ta.has-hover ? Theme.hover : transparent;
+                }
+                label := Text {
+                    opacity: Theme.page-a;
+                    text: c;
+                    color: i == DiskState.crumbs.length - 1 ? Theme.text : Theme.accent;
+                    font-size: 12.5px;
+                    font-weight: Theme.semi;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                ta := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        DiskState.crumb(i);
+                    }
+                }
+            }
+        }
+    }
+}
+
+component DetailCard inherits Glass {
+    radius: 17.5px;
+    strong: true;
+    height: lay.preferred-height;
+    lay := VerticalLayout {
+        padding: 14px;
+        spacing: 6px;
+        if !DiskState.sel-valid: Text {
+            text: T.s("disk.nosel");
+            color: Theme.text-dim.transparentize(1 - Theme.page-a);
+            font-size: 12px;
+            wrap: word-wrap;
+        }
+        if DiskState.sel-valid: FadeText {
+            height: 20px;
+            text: DiskState.sel-title;
+            fg: Theme.text;
+            font-size: 14px;
+            font-weight: 700;
+            overflow: elide;
+        }
+        if DiskState.sel-valid: FadeText {
+            height: 15px;
+            text: DiskState.sel-path;
+            fg: Theme.text-dim;
+            font-size: 10.5px;
+            overflow: elide;
+        }
+        if DiskState.sel-valid: FadeText {
+            height: 17px;
+            text: DiskState.sel-meta;
+            fg: Theme.text;
+            font-size: 12px;
+        }
+        if DiskState.sel-valid: HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            Pill {
+                text: DiskState.sel-type;
+                fg: Theme.tint-fg(DiskState.sel-tint);
+                bg: Theme.tint-bg(DiskState.sel-tint);
+            }
+            if DiskState.sel-owner != "": Rectangle {
+                width: owner-label.preferred-width + 20px;
+                height: 19px;
+                border-radius: 9.5px;
+                background: Theme.accent-soft.transparentize(1 - Theme.page-a);
+                owner-label := Text {
+                    opacity: Theme.page-a;
+                    text: DiskState.sel-owner;
+                    color: Theme.accent;
+                    font-size: 11px;
+                    font-weight: Theme.semi;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        DiskState.show-owner();
+                    }
+                }
+            }
+            if DiskState.sel-copies != "": Rectangle {
+                width: copies-label.preferred-width + 20px;
+                height: 19px;
+                border-radius: 9.5px;
+                background: Theme.warn-soft.transparentize(1 - Theme.page-a);
+                copies-label := Text {
+                    opacity: Theme.page-a;
+                    text: DiskState.sel-copies;
+                    color: Theme.warn;
+                    font-size: 11px;
+                    font-weight: Theme.semi;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        DiskState.show-copies();
+                    }
+                }
+            }
+        }
+        if DiskState.sel-valid: HorizontalLayout {
+            spacing: 8px;
+            padding-top: 4px;
+            if DiskState.sel-dir: SecondaryButton {
+                text: T.s("disk.open");
+                height: 30px;
+                clicked => {
+                    DiskState.open-selected();
+                }
+            }
+            SecondaryButton {
+                text: T.s("disk.reveal");
+                height: 30px;
+                clicked => {
+                    DiskState.reveal-selected();
+                }
+            }
+        }
+    }
+}
+
+export component DiskPage inherits PageFrame {
+    property <bool> wide: self.width >= 720px;
+    property <float> empty-a: DiskState.has-tree ? 0 : 1;
+    animate empty-a { duration: 220ms; easing: ease-out; }
+
+    VerticalLayout {
+        spacing: 11px;
+        Text {
+            opacity: Theme.page-a;
+            text: T.s("disk.title");
+            color: Theme.text;
+            font-size: 25.5px;
+            font-weight: 700;
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            SegTabs {
+                names: DiskState.locations;
+                current: DiskState.location;
+                horizontal-stretch: 1;
+                selected(i) => {
+                    DiskState.choose-location(i);
+                }
+            }
+        }
+        Crumbs {
+            visible: DiskState.has-tree;
+        }
+        HorizontalLayout {
+            vertical-stretch: 1;
+            spacing: 12px;
+            VerticalLayout {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                spacing: 8px;
+                map := Rectangle {
+                    vertical-stretch: 1;
+                    changed width => {
+                        DiskState.area-changed(self.width / 1px, self.height / 1px);
+                    }
+                    changed height => {
+                        DiskState.area-changed(self.width / 1px, self.height / 1px);
+                    }
+                    Sq {
+                        r: 18;
+                        fade: Theme.page-a;
+                        colorize: Theme.card;
+                        edge: Theme.card-border;
+                        edge-width: 1px;
+                    }
+                    for e in DiskState.epoch: Rectangle {
+                        x: 4px;
+                        y: 4px;
+                        width: parent.width - 8px;
+                        height: parent.height - 8px;
+                        opacity: intro.v * Theme.page-a;
+                        transform-scale: 0.965 + 0.035 * intro.v;
+                        intro := Intro {}
+                        Rectangle {
+                            for t in DiskState.tiles: TileView {
+                                t: t;
+                                aw: parent.width;
+                                ah: parent.height;
+                            }
+                        }
+                    }
+                    EmptyState {
+                        fade: root.empty-a;
+                        visible: root.empty-a > 0.01;
+                        icon: "grid";
+                        title: DiskState.scanning ? T.s("disk.scanning") : T.s("disk.empty");
+                        sub: DiskState.scanning ? DiskState.status : T.s("disk.empty.sub");
+                    }
+                }
+                Rectangle {
+                    height: 20px;
+                    min-width: 0px;
+                    preferred-width: 10px;
+                    clip: true;
+                    HorizontalLayout {
+                        width: parent.width;
+                        spacing: 12px;
+                        alignment: start;
+                        for l in DiskState.legend: Rectangle {
+                            visible: self.x + self.width <= parent.width + 0.5px;
+                            HorizontalLayout {
+                            spacing: 5px;
+                            Rectangle {
+                                width: 9px;
+                                height: 9px;
+                                border-radius: 3px;
+                                background: Theme.tint-fg(l.tint).transparentize(1 - Theme.page-a);
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                opacity: Theme.page-a;
+                                text: l.name + " " + l.size;
+                                color: Theme.text-dim;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            }
+                        }
+                    }
+                }
+            }
+            if root.wide: VerticalLayout {
+                width: 318px;
+                spacing: 10px;
+                DetailCard {}
+                SegTabs {
+                    names: [T.s("disk.tab.items"), T.s("disk.tab.largest"), T.s("disk.tab.copies"), T.s("disk.tab.apps")];
+                    current: DiskState.list-mode;
+                    selected(i) => {
+                        DiskState.set-list-mode(i);
+                    }
+                }
+                if DiskState.list-back != "": Rectangle {
+                    height: 26px;
+                    Text {
+                        opacity: Theme.page-a;
+                        text: "‹  " + DiskState.list-back;
+                        color: Theme.accent;
+                        font-size: 12px;
+                        font-weight: Theme.semi;
+                        vertical-alignment: center;
+                    }
+                    TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            DiskState.go-back();
+                        }
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    for e in DiskState.list-epoch: holder := Rectangle {
+                        property <bool> settled: false;
+                        property <int> want: min(DiskState.rows.length, ceil(self.height / 46px) + 2);
+                        property <int> count: 0;
+                        init => {
+                            self.count = self.want;
+                        }
+                        changed want => {
+                            self.count = self.want;
+                        }
+                        Timer {
+                            interval: 1400ms;
+                            running: !holder.settled;
+                            triggered => {
+                                holder.settled = true;
+                            }
+                        }
+                        if holder.count > 0: lg := ListGroup {
+                            property <int> first: max(0, min(floor(self.scroll-y / 46px), DiskState.rows.length - holder.count));
+                            limit: parent.height;
+                            width: parent.width;
+                            Rectangle {
+                                height: DiskState.rows.length * 46px;
+                                for k in holder.count: RowView {
+                                    y: (lg.first + k) * 46px;
+                                    r: DiskState.rows[lg.first + k];
+                                    last: lg.first + k == DiskState.rows.length - 1;
+                                    order: k;
+                                    settled: holder.settled;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Glass {
+            height: 52px;
+            radius: 17.5px;
+            strong: true;
+            HorizontalLayout {
+                padding-left: 21px;
+                padding-right: 11px;
+                spacing: 9.5px;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 5px;
+                    horizontal-stretch: 1;
+                    Text {
+                        opacity: Theme.page-a;
+                        text: DiskState.scanning ? DiskState.status : (DiskState.hover-text != "" ? DiskState.hover-text : DiskState.folder-text);
+                        color: Theme.text;
+                        font-size: 12.5px;
+                        font-weight: Theme.semi;
+                        overflow: elide;
+                    }
+                    ProgressStrip {
+                        active: DiskState.scanning;
+                    }
+                }
+                if !DiskState.scanning: PrimaryButton {
+                    text: DiskState.has-tree ? T.s("disk.rescan") : T.s("disk.scan");
+                    icon: "refresh";
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        DiskState.scan();
+                    }
+                }
+                if DiskState.scanning: SecondaryButton {
+                    text: T.s("dialog.cancel");
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        DiskState.cancel();
+                    }
+                }
+            }
+        }
+    }
+}

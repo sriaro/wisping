@@ -1,0 +1,141 @@
+import { Theme } from "theme.slint";
+
+export component Intro inherits Rectangle {
+    in property <int> order: 0;
+    in property <bool> done: false;
+    out property <float> v: 0;
+    property <bool> snap: false;
+    property <bool> go: Theme.quiet || Theme.veil-target < 0.5;
+    property <int> tick: Theme.enter-tick;
+    width: 0px;
+    height: 0px;
+    animate v { duration: Theme.quiet || root.snap ? 0ms : 500ms; easing: spring(0); }
+
+    init => {
+        if (Theme.quiet || root.done) {
+            root.snap = true;
+            root.v = 1;
+            root.snap = false;
+        } else if (root.go) {
+            arm.running = true;
+        }
+    }
+
+    changed go => {
+        if (root.go && root.v < 1) {
+            arm.running = false;
+            arm.running = true;
+        }
+    }
+
+    changed tick => {
+        arm.running = false;
+        root.snap = true;
+        root.v = 0;
+        root.snap = false;
+        if (root.go) {
+            arm.running = true;
+        }
+    }
+
+    arm := Timer {
+        interval: 20ms + min(root.order, 12) * 38ms;
+        running: false;
+        triggered => {
+            root.v = 1;
+            self.running = false;
+        }
+    }
+}
+
+export component Rise inherits Rectangle {
+    in property <int> order: 0;
+    in property <length> lift: 12px;
+    in property <bool> paged: true;
+    in property <float> fade: 1;
+    out property <float> v: rise-intro.v * root.fade * (root.paged ? Theme.page-a : 1);
+    out property <float> hide: 1 - rise-intro.v;
+    rise-intro := Intro {
+        order: root.order;
+    }
+
+    Rectangle {
+        y: Theme.glide(1 - rise-intro.v, root.lift);
+        width: parent.width;
+        height: parent.height;
+        @children
+    }
+}
+
+export component FadeText inherits Rectangle {
+    in property <string> text;
+    in property <color> fg: Theme.text;
+    in property <length> font-size: 12px;
+    in property <int> font-weight: 400;
+    in property <TextHorizontalAlignment> horizontal-alignment: left;
+    in property <TextVerticalAlignment> vertical-alignment: top;
+    in property <TextOverflow> overflow: clip;
+    in property <TextWrap> wrap: no-wrap;
+    in property <bool> intro: false;
+    in property <float> fade: Theme.page-a;
+    property <string> shown;
+    property <bool> ready: false;
+    property <float> a: root.intro ? 0 : 1;
+    preferred-width: label.preferred-width;
+    preferred-height: label.preferred-height;
+    animate a { duration: 150ms; easing: ease-in-out; }
+
+    init => {
+        root.shown = root.text;
+        if (root.intro) {
+            swap.interval = 30ms;
+            swap.running = true;
+        }
+    }
+
+    changed text => {
+        if (!root.ready || Theme.calm) {
+            root.shown = root.text;
+            return;
+        }
+        root.a = 0;
+        swap.running = false;
+        swap.running = true;
+    }
+
+    Timer {
+        interval: 600ms;
+        running: true;
+        triggered => {
+            root.ready = true;
+            self.running = false;
+        }
+    }
+
+    swap := Timer {
+        interval: 150ms;
+        running: false;
+        triggered => {
+            root.shown = root.text;
+            root.a = 1;
+            self.interval = 150ms;
+            self.running = false;
+        }
+    }
+
+    label := Text {
+        x: 0px;
+        y: Theme.glide(1 - root.a, 5px);
+        width: parent.width;
+        height: parent.height;
+        text: root.shown;
+        opacity: root.a * root.fade;
+        color: root.fg;
+        font-size: root.font-size;
+        font-weight: root.font-weight;
+        horizontal-alignment: root.horizontal-alignment;
+        vertical-alignment: root.vertical-alignment;
+        overflow: root.overflow;
+        wrap: root.wrap;
+    }
+}

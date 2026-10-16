@@ -1,0 +1,334 @@
+import { Theme, T, AppState, DriveItem, TopItem } from "../theme.slint";
+import { Glass, Sq, Chip, Pill, Icon, IconButton, PrimaryButton, HeroRing } from "../widgets.slint";
+import { PageFrame, PageHead } from "common.slint";
+import { Intro, FadeText, Rise } from "../motion.slint";
+
+component DriveRow inherits Rise {
+    in property <DriveItem> item;
+    height: 38px;
+
+    HorizontalLayout {
+        spacing: 12px;
+        Text {
+            opacity: root.v;
+            text: root.item.name;
+            color: Theme.text;
+            font-size: 13px;
+            font-weight: 700;
+            width: 28px;
+            vertical-alignment: center;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 5px;
+            horizontal-stretch: 1;
+            min-width: 0px;
+            FadeText {
+                fade: root.v;
+                text: root.item.text;
+                fg: Theme.text-dim;
+                font-size: 11.5px;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+            Rectangle {
+                height: 6px;
+                border-radius: 3px;
+                background: Theme.ring-track.transparentize(1 - root.v);
+                Rectangle {
+                    x: 0px;
+                    width: parent.width * root.item.frac * root.v;
+                    height: parent.height;
+                    border-radius: 3px;
+                    background: (root.item.tone == 0 ? Theme.ok : root.item.tone == 1 ? Theme.warn : Theme.danger).transparentize(1 - root.v);
+                }
+            }
+        }
+    }
+}
+
+component TopRow inherits Rise {
+    in property <TopItem> item;
+    height: 38px;
+
+    HorizontalLayout {
+        spacing: 10px;
+        Text {
+            opacity: root.v;
+            text: root.item.name;
+            color: Theme.text;
+            font-size: 12.5px;
+            font-weight: Theme.semi;
+            horizontal-stretch: 1;
+            min-width: 0px;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Pill {
+            fade: root.v;
+            text: root.item.risk;
+            fg: root.item.risk-tone == 0 ? Theme.ok : root.item.risk-tone == 1 ? Theme.warn : Theme.danger;
+            bg: root.item.risk-tone == 0 ? Theme.ok-soft : root.item.risk-tone == 1 ? Theme.warn-soft : Theme.danger-soft;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            opacity: root.v;
+            text: root.item.size;
+            color: Theme.text;
+            font-size: 12.5px;
+            font-weight: 700;
+            width: 72px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+    }
+}
+
+component Tile inherits Glass {
+    in property <string> icon;
+    in property <int> tint: 1;
+    in property <string> value;
+    in property <string> label;
+    callback activated;
+    hot: ta.has-hover;
+    height: 105.5px;
+    radius: 17.5px;
+
+    Chip {
+        x: 17.5px;
+        y: 16px;
+        icon: root.icon;
+        tint: root.tint;
+        size: 33.5px;
+    }
+    FadeText {
+        x: 17.5px;
+        y: 57.5px;
+        width: root.width - 35px;
+        height: 30px;
+        text: root.value;
+        fg: Theme.text;
+        font-size: 24px;
+        font-weight: 700;
+        overflow: elide;
+    }
+    Text {
+        opacity: Theme.page-a;
+        x: 17.5px;
+        y: 85px;
+        width: root.width - 35px;
+        text: root.label;
+        color: Theme.text-dim;
+        font-size: 11px;
+        overflow: elide;
+    }
+    ta := TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.activated();
+        }
+    }
+}
+
+export component HomePage inherits PageFrame {
+    VerticalLayout {
+        spacing: 16px;
+        PageHead {
+            title: T.s("home.title");
+            sub: T.s("home.sub");
+        }
+        if AppState.low-disk-text != "": Rectangle {
+            height: 46px;
+            Sq {
+                fade: Theme.page-a;
+                r: 16;
+                colorize: Theme.warn-soft;
+                edge: Theme.warn.with-alpha(0.35);
+                edge-width: 1px;
+            }
+            HorizontalLayout {
+                padding-left: 16px;
+                padding-right: 8px;
+                spacing: 11px;
+                Icon {
+                    opacity: Theme.page-a;
+                    kind: "alert";
+                    size: 17px;
+                    colorize: Theme.warn;
+                    y: (parent.height - self.height) / 2;
+                }
+                Text {
+                    opacity: Theme.page-a;
+                    text: AppState.low-disk-text;
+                    color: Theme.text;
+                    font-size: 12.5px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                IconButton {
+                    icon: "x";
+                    size: 30px;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.dismiss-low-disk();
+                    }
+                }
+            }
+        }
+        Glass {
+            height: 219px;
+            radius: 24px;
+            strong: true;
+            HorizontalLayout {
+                padding: 21.5px;
+                padding-left: 30.5px;
+                spacing: 35px;
+                HeroRing {
+                    mode: AppState.ring-mode;
+                    big: AppState.ring-big;
+                    small: AppState.ring-small;
+                    y: (parent.height - self.height) / 2;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 8px;
+                    horizontal-stretch: 1;
+                    FadeText {
+                        text: AppState.hero-title;
+                        fg: Theme.text;
+                        font-size: 24px;
+                        font-weight: 700;
+                        wrap: word-wrap;
+                    }
+                    FadeText {
+                        text: AppState.hero-text;
+                        fg: Theme.text-dim;
+                        font-size: 12.5px;
+                        wrap: word-wrap;
+                    }
+                    Rectangle {
+                        height: 8px;
+                    }
+                    HorizontalLayout {
+                        spacing: 9.5px;
+                        alignment: start;
+                        PrimaryButton {
+                            text: T.s("btn.scanall");
+                            icon: "search";
+                            enabled: !AppState.busy;
+                            clicked => {
+                                AppState.scan-all();
+                            }
+                        }
+                        if AppState.can-clean-now: PrimaryButton {
+                            text: T.s("btn.cleannow");
+                            icon: "sparkles";
+                            enabled: !AppState.busy;
+                            clicked => {
+                                AppState.page = 1;
+                                AppState.clean();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        HorizontalLayout {
+            spacing: 14.5px;
+            Tile {
+                icon: "trash";
+                tint: 0;
+                value: AppState.tile-junk;
+                label: T.s("tile.junk");
+                activated => {
+                    AppState.page = 1;
+                }
+            }
+            Tile {
+                icon: "database";
+                tint: 2;
+                value: AppState.tile-reg;
+                label: T.s("tile.registry");
+                activated => {
+                    AppState.page = 2;
+                }
+            }
+            Tile {
+                icon: "power";
+                tint: 3;
+                value: AppState.tile-start;
+                label: T.s("tile.startup");
+                activated => {
+                    AppState.page = 3;
+                }
+            }
+        }
+        area := Rectangle {
+            vertical-stretch: 1;
+            min-height: 0px;
+            if area.height >= 214px: HorizontalLayout {
+                spacing: 14.5px;
+                height: 214px;
+                y: 0px;
+                Glass {
+                    radius: 17.5px;
+                    VerticalLayout {
+                        padding: 16px;
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        spacing: 4px;
+                        alignment: start;
+                        Text {
+                            opacity: Theme.page-a;
+                            text: T.s("home.disks");
+                            color: Theme.text-dim;
+                            font-size: 11.5px;
+                            font-weight: 700;
+                            height: 20px;
+                        }
+                        for d[i] in AppState.drives: DriveRow {
+                            order: i;
+                            item: d;
+                        }
+                    }
+                }
+                Glass {
+                    radius: 17.5px;
+                    hot: top-ta.has-hover;
+                    VerticalLayout {
+                        padding: 16px;
+                        padding-left: 20px;
+                        padding-right: 20px;
+                        spacing: 4px;
+                        alignment: start;
+                        Text {
+                            opacity: Theme.page-a;
+                            text: T.s("home.top");
+                            color: Theme.text-dim;
+                            font-size: 11.5px;
+                            font-weight: 700;
+                            height: 20px;
+                        }
+                        if AppState.tops.length == 0: Text {
+                            text: T.s("home.top.empty");
+                            color: Theme.text-dim.transparentize(1 - Theme.page-a);
+                            font-size: 12px;
+                            wrap: word-wrap;
+                        }
+                        for t[i] in AppState.tops: TopRow {
+                            order: i;
+                            item: t;
+                        }
+                    }
+                    top-ta := TouchArea {
+                        mouse-cursor: pointer;
+                        clicked => {
+                            AppState.page = 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,193 @@
+import { Theme, T } from "../theme.slint";
+import { Glass, Chip, SecondaryButton, IconButton, ListGroup, ProgressStrip, SegTabs, SearchBox } from "../widgets.slint";
+import { PageFrame, PageHead, EmptyState } from "common.slint";
+import { Intro, Rise } from "../motion.slint";
+
+export struct ProgItem {
+    idx: int,
+    name: string,
+    sub: string,
+    size: string,
+    date: string,
+    tint: int,
+    can-open: bool,
+}
+
+export global UninstallState {
+    in-out property <[ProgItem]> programs: [];
+    in-out property <string> count-text;
+    in-out property <int> sort: 0;
+    in-out property <bool> loading: false;
+    callback set-sort(int);
+    callback set-filter(string);
+    callback uninstall(int);
+    callback open-folder(int);
+    callback refresh();
+}
+
+component ProgRow inherits Rise {
+    in property <ProgItem> item;
+    in property <bool> last: false;
+    in property <bool> shown: true;
+    height: 58px;
+    visible: shown;
+
+    if !root.last: Rectangle {
+        x: 68px;
+        y: parent.height - 1px;
+        width: parent.width - 68px - 14px;
+        height: 1px;
+        background: Theme.sep.transparentize(1 - root.v);
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 13px;
+        spacing: 13px;
+        Chip {
+            fade: root.v;
+            icon: "box";
+            tint: root.item.tint;
+            size: 37px;
+            y: (parent.height - self.height) / 2;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                opacity: root.v;
+                text: root.item.name;
+                color: Theme.text;
+                font-size: 13.5px;
+                font-weight: Theme.semi;
+                overflow: elide;
+            }
+            Text {
+                opacity: root.v;
+                text: root.item.sub;
+                color: Theme.text-dim;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+        Text {
+            opacity: root.v;
+            text: root.item.date;
+            color: Theme.text-dim;
+            font-size: 11.5px;
+            width: 78px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        Text {
+            opacity: root.v;
+            text: root.item.size;
+            color: Theme.text;
+            font-size: 12px;
+            font-weight: Theme.semi;
+            width: 72px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+        }
+        IconButton {
+            fade: root.v;
+            icon: "folder";
+            enabled: root.item.can-open;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                UninstallState.open-folder(root.item.idx);
+            }
+        }
+        SecondaryButton {
+            fade: root.v;
+            text: T.s("uninst.btn");
+            height: 32px;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                UninstallState.uninstall(root.item.idx);
+            }
+        }
+    }
+}
+
+export component UninstallPage inherits PageFrame {
+    VerticalLayout {
+        spacing: 14.5px;
+        PageHead {
+            title: T.s("uninst.title");
+            sub: T.s("uninst.sub");
+        }
+        HorizontalLayout {
+            spacing: 10px;
+            SearchBox {
+                placeholder: T.s("uninst.search");
+                horizontal-stretch: 1;
+                changed(t) => {
+                    UninstallState.set-filter(t);
+                }
+            }
+            SegTabs {
+                names: [T.s("uninst.sort.name"), T.s("uninst.sort.size"), T.s("uninst.sort.date")];
+                current: UninstallState.sort;
+                width: 300px;
+                selected(i) => {
+                    UninstallState.set-sort(i);
+                }
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            if UninstallState.programs.length > 0: lg := ListGroup {
+                limit: parent.height;
+                width: parent.width;
+                for item[i] in UninstallState.programs: ProgRow {
+                    order: i;
+                    shown: self.absolute-position.y + self.height > lg.absolute-position.y && self.absolute-position.y < lg.absolute-position.y + lg.height;
+                    item: item;
+                    last: i == UninstallState.programs.length - 1;
+                }
+            }
+            if UninstallState.programs.length == 0: EmptyState {
+                icon: "box";
+                title: T.s("uninst.empty");
+                sub: "";
+            }
+        }
+        Glass {
+            height: 57.5px;
+            radius: 17.5px;
+            strong: true;
+            HorizontalLayout {
+                padding-left: 21px;
+                padding-right: 11px;
+                spacing: 9.5px;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 5px;
+                    horizontal-stretch: 1;
+                    Text {
+                        opacity: Theme.page-a;
+                        text: UninstallState.count-text;
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: Theme.semi;
+                        overflow: elide;
+                    }
+                    ProgressStrip {
+                        active: UninstallState.loading;
+                    }
+                }
+                SecondaryButton {
+                    text: T.s("btn.refresh");
+                    icon: "refresh";
+                    enabled: !UninstallState.loading;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        UninstallState.refresh();
+                    }
+                }
+            }
+        }
+    }
+}

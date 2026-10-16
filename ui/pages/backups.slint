@@ -1,0 +1,151 @@
+import { Theme, T } from "../theme.slint";
+import { Chip, SecondaryButton, IconButton, ListGroup, Toggle, SegTabs } from "../widgets.slint";
+import { PageFrame, PageHead, EmptyState } from "common.slint";
+import { Intro, Rise } from "../motion.slint";
+
+export struct DataItem {
+    id: string,
+    title: string,
+    desc: string,
+    state: string,
+    icon: string,
+    tint: int,
+    toggle: bool,
+    on: bool,
+    button: string,
+    enabled: bool,
+    deletable: bool,
+}
+
+export global BackupsState {
+    in-out property <[DataItem]> items: [];
+    in-out property <[string]> tab-names: [];
+    in-out property <int> tab: 0;
+    in-out property <string> sub;
+    in-out property <string> empty;
+    callback select-tab(int);
+    callback switched(string, bool);
+    callback act(string);
+    callback remove(string);
+}
+
+component DataRow inherits Rise {
+    in property <DataItem> item;
+    in property <bool> last: false;
+    height: 70px;
+
+    if !root.last: Rectangle {
+        x: 68px;
+        y: parent.height - 1px;
+        width: parent.width - 68px - 14px;
+        height: 1px;
+        background: Theme.sep.transparentize(1 - root.v);
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 13px;
+        Chip {
+            fade: root.v;
+            icon: root.item.icon;
+            tint: root.item.tint;
+            size: 37px;
+            y: (parent.height - self.height) / 2;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 3px;
+            horizontal-stretch: 1;
+            min-width: 0px;
+            Text {
+                opacity: root.v;
+                text: root.item.title;
+                color: Theme.text;
+                font-size: 13.5px;
+                font-weight: Theme.semi;
+                overflow: elide;
+            }
+            Text {
+                opacity: root.v;
+                text: root.item.desc;
+                color: Theme.text-dim;
+                font-size: 11px;
+                wrap: word-wrap;
+                max-height: 30px;
+                overflow: elide;
+            }
+        }
+        if root.item.state != "": Text {
+            opacity: root.v;
+            text: root.item.state;
+            color: Theme.text-dim;
+            font-size: 11.5px;
+            width: 70px;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.item.toggle: Toggle {
+            fade: root.v;
+            on: root.item.on;
+            y: (parent.height - self.height) / 2;
+            toggled(v) => {
+                BackupsState.switched(root.item.id, v);
+            }
+        }
+        if !root.item.toggle && root.item.button != "": SecondaryButton {
+            fade: root.v;
+            text: root.item.button;
+            height: 32px;
+            enabled: root.item.enabled;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                BackupsState.act(root.item.id);
+            }
+        }
+        if root.item.deletable: IconButton {
+            fade: root.v;
+            icon: "trash";
+            danger: true;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                BackupsState.remove(root.item.id);
+            }
+        }
+    }
+}
+
+export component BackupsPage inherits PageFrame {
+    VerticalLayout {
+        spacing: 14.5px;
+        PageHead {
+            title: T.s("backups.title");
+            sub: BackupsState.sub;
+        }
+        SegTabs {
+            names: BackupsState.tab-names;
+            current: BackupsState.tab;
+            selected(i) => {
+                BackupsState.select-tab(i);
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            if BackupsState.items.length > 0: ListGroup {
+                limit: parent.height;
+                width: parent.width;
+                for item[i] in BackupsState.items: DataRow {
+                    order: i;
+                    item: item;
+                    last: i == BackupsState.items.length - 1;
+                }
+            }
+            if BackupsState.items.length == 0: EmptyState {
+                icon: "archive";
+                title: BackupsState.empty;
+                sub: BackupsState.sub;
+            }
+        }
+    }
+}

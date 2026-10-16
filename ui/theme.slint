@@ -1,0 +1,283 @@
+export global Theme {
+    in-out property <bool> dark: false;
+    in-out property <string> ui-font: "Segoe UI";
+    in-out property <int> semi: 600;
+    in-out property <image> fade-image;
+    in-out property <float> fade-opacity: 0;
+    in-out property <float> content-opacity: 1;
+    in-out property <bool> quiet: false;
+    in-out property <bool> settling: false;
+    in-out property <int> shown-page: 0;
+    in-out property <float> veil-target: 0;
+    in-out property <float> veil-ms: 100;
+    in-out property <int> enter-tick: 0;
+    in-out property <float> scale: 1;
+    in-out property <float> page-a: 1;
+    out property <bool> calm: quiet || settling;
+
+    out property <color> bg-base: dark ? #0b101b : #e9eff8;
+    out property <brush> bg-gradient: dark
+        ? @linear-gradient(135deg, #111a2a 0%, #0b0f19 55%, #151030 100%)
+        : @linear-gradient(135deg, #f5f9fe 0%, #e6eef9 55%, #ede9fb 100%);
+    out property <brush> blob-a: dark
+        ? @radial-gradient(circle, #19b8a626 0%, #19b8a617 22%, #19b8a60b 42%, #19b8a604 62%, #19b8a601 82%, #19b8a600 100%)
+        : @radial-gradient(circle, #38e0c434 0%, #38e0c420 22%, #38e0c40f 42%, #38e0c405 62%, #38e0c401 82%, #38e0c400 100%);
+    out property <brush> blob-b: dark
+        ? @radial-gradient(circle, #2f5be026 0%, #2f5be017 22%, #2f5be00b 42%, #2f5be004 62%, #2f5be001 82%, #2f5be000 100%)
+        : @radial-gradient(circle, #3a62f030 0%, #3a62f01d 22%, #3a62f00e 42%, #3a62f005 62%, #3a62f001 82%, #3a62f000 100%);
+    out property <brush> blob-c: dark
+        ? @radial-gradient(circle, #7b5cf024 0%, #7b5cf016 22%, #7b5cf00a 42%, #7b5cf003 62%, #7b5cf001 82%, #7b5cf000 100%)
+        : @radial-gradient(circle, #9b7bff2c 0%, #9b7bff1b 22%, #9b7bff0d 42%, #9b7bff04 62%, #9b7bff01 82%, #9b7bff00 100%);
+    out property <color> card: dark ? #ffffff12 : #ffffff99;
+    out property <color> card-strong: dark ? #ffffff1a : #ffffffbf;
+    out property <brush> glass-tint: dark ? #0a0f1a66 : #f4f8ff55;
+    out property <brush> btn-glass: dark
+        ? @linear-gradient(180deg, #ffffff2a 0%, #ffffff14 100%)
+        : @linear-gradient(180deg, #ffffffe0 0%, #ffffff80 100%);
+    out property <color> card-border: dark ? #ffffff22 : #ffffffe8;
+    out property <color> card-border-hot: dark ? #5b8fe088 : #2f7bf580;
+    out property <color> sheen-top: dark ? #ffffff10 : #ffffff90;
+    out property <color> glow: dark ? #2a58c038 : #2f6ff030;
+    out property <color> shadow: dark ? #00000040 : #1a2a5020;
+    out property <color> text: dark ? #eff3fa : #141b2b;
+    out property <color> text-dim: dark ? #a3b0c4 : #4f5b70;
+    out property <color> accent: dark ? #6f9fe6 : #2f6ff0;
+    out property <brush> accent-gradient: dark
+        ? @linear-gradient(135deg, #12857c 0%, #2c58c4 100%)
+        : @linear-gradient(135deg, #17bfb2 0%, #2f6ff0 100%);
+    out property <brush> ring-brush: dark
+        ? @linear-gradient(135deg, #2a9a90 0%, #4d82d6 100%)
+        : @linear-gradient(135deg, #22d3c2 0%, #2f6ff0 100%);
+    out property <color> accent-soft: dark ? #5b8fe025 : #2f6ff01f;
+    out property <color> nav-active: dark ? #5b8fe025 : #2f6ff020;
+    out property <color> sep: dark ? #ffffff14 : #1420401a;
+    out property <color> hover: dark ? #ffffff16 : #14204012;
+    out property <color> chip-bg: dark ? #ffffff10 : #ffffff8c;
+    out property <color> switch-off: dark ? #3b4659 : #c8d1df;
+    out property <color> ring-track: dark ? #ffffff22 : #5b687d1a;
+    out property <color> check-border: dark ? #5e6b80 : #a5b1c4;
+    out property <color> scroll-thumb: dark ? #5e6b8099 : #8896ab88;
+    out property <color> danger: dark ? #e5696e : #d12f36;
+    out property <color> danger-soft: dark ? #ff6b702e : #e5484d1f;
+    out property <color> warn: dark ? #e0b240 : #b45a00;
+    out property <color> warn-soft: dark ? #fbbf2426 : #f59e0b26;
+    out property <color> ok: dark ? #3dbb8a : #037a56;
+    out property <color> ok-soft: dark ? #34d39926 : #10b98122;
+    out property <color> toast-bg: dark ? #eef2f9f2 : #162033f2;
+    out property <color> toast-text: dark ? #101828 : #ffffff;
+    out property <color> scrim: dark ? #000000a6 : #10182866;
+    out property <color> dialog-bg: dark ? #171f30f2 : #fffffff7;
+
+    pure public function tint-fg(t: int) -> color {
+        if (t == 0) { return dark ? #38b8a8 : #0f9f8f; }
+        if (t == 1) { return dark ? #6f9fe6 : #2f6ff0; }
+        if (t == 2) { return dark ? #9a84e0 : #7c5cf0; }
+        if (t == 3) { return dark ? #df9f5a : #d9680a; }
+        if (t == 4) { return dark ? #d96fa8 : #db3e86; }
+        if (t == 5) { return dark ? #4cc27a : #16a34a; }
+        if (t == 6) { return dark ? #e5696e : #dc3c42; }
+        return dark ? #8a97ab : #5b687d;
+    }
+
+    pure public function snap(v: length) -> length {
+        return round(v / 1px * max(scale, 0.25)) / max(scale, 0.25) * 1px;
+    }
+
+    pure public function glide(rest: float, d: length) -> length {
+        return snap(d * rest * rest);
+    }
+
+    pure public function tint-bg(t: int) -> color {
+        return tint-fg(t).with-alpha(0.16);
+    }
+}
+
+export global Geo {
+    pure callback squircle(float, float, float, float) -> string;
+}
+
+export global T {
+    in-out property <int> rev: 0;
+    pure callback t(string, int) -> string;
+    pure callback f(string, string, string, string, int) -> string;
+
+    pure public function s(key: string) -> string {
+        return t(key, rev);
+    }
+
+    pure public function f1(key: string, a: string) -> string {
+        return f(key, a, "", "", rev);
+    }
+
+    pure public function f2(key: string, a: string, b: string) -> string {
+        return f(key, a, b, "", rev);
+    }
+
+    pure public function f3(key: string, a: string, b: string, c: string) -> string {
+        return f(key, a, b, c, rev);
+    }
+}
+
+export struct CatItem {
+    id: string,
+    group: string,
+    name: string,
+    desc: string,
+    risk: string,
+    risk-tone: int,
+    icon: string,
+    tint: int,
+    size: string,
+    count: string,
+    selected: bool,
+    locked: bool,
+    scanned: bool,
+}
+
+export struct DetailRow {
+    name: string,
+    place: string,
+    size: string,
+    count: string,
+    icon: string,
+    tint: int,
+    share: float,
+    percent: string,
+    path: string,
+}
+
+export struct DriveItem {
+    name: string,
+    text: string,
+    frac: float,
+    tone: int,
+}
+
+export struct TopItem {
+    name: string,
+    size: string,
+    risk: string,
+    risk-tone: int,
+}
+
+export struct IssueItem {
+    kind-name: string,
+    title: string,
+    detail: string,
+    tint: int,
+    selected: bool,
+    locked: bool,
+}
+
+export struct StartItem {
+    idx: int,
+    icon: string,
+    publisher: string,
+    system: bool,
+    name: string,
+    command: string,
+    kind-name: string,
+    tint: int,
+    enabled: bool,
+    can-toggle: bool,
+    can-delete: bool,
+    missing: bool,
+    admin: bool,
+    tag: string,
+    tone: int,
+}
+
+export global AppState {
+    in-out property <int> page: 0;
+    in-out property <bool> maximized: false;
+    in-out property <bool> has-report: false;
+    in-out property <bool> glass-enabled: true;
+    in-out property <bool> glass-active: false;
+    in-out property <bool> keep-recent: true;
+    in-out property <bool> busy: false;
+    in-out property <string> status;
+    in-out property <bool> is-admin: false;
+    in-out property <string> low-disk-text;
+
+    in-out property <int> ring-mode: 0;
+    in-out property <string> hero-title;
+    in-out property <string> hero-text;
+    in-out property <string> ring-big;
+    in-out property <string> ring-small;
+    in-out property <string> tile-junk;
+    in-out property <string> tile-reg;
+    in-out property <string> tile-start;
+    in-out property <bool> can-clean-now: false;
+    in-out property <[DriveItem]> drives: [];
+    in-out property <[TopItem]> tops: [];
+
+    in-out property <[CatItem]> cats: [];
+    in-out property <string> clean-selected-text;
+    in-out property <bool> can-run-clean: false;
+
+    in-out property <[IssueItem]> issues: [];
+    in-out property <bool> reg-scanned: false;
+    in-out property <string> reg-count-text;
+    in-out property <string> reg-selected-text;
+    in-out property <bool> can-fix: false;
+
+    in-out property <[StartItem]> startups: [];
+    in-out property <string> start-count-text;
+    in-out property <int> start-tab: 0;
+    in-out property <[string]> start-tab-names: [];
+    in-out property <string> start-sub;
+    in-out property <bool> start-show-system: false;
+
+    in-out property <bool> dialog-open: false;
+    in-out property <string> dialog-title;
+    in-out property <string> dialog-text;
+    in-out property <string> dialog-ok;
+    in-out property <bool> dialog-danger: false;
+    in-out property <bool> dialog-single: false;
+
+    in-out property <bool> toast-open: false;
+    in-out property <string> toast-text;
+
+    in-out property <bool> details-open: false;
+    in-out property <bool> details-loading: false;
+    in-out property <string> details-title;
+    in-out property <string> details-sub;
+    in-out property <string> details-icon: "folder";
+    in-out property <int> details-tint: 1;
+    in-out property <string> details-total;
+    in-out property <[DetailRow]> details-rows: [];
+    callback show-details(int);
+    callback close-details();
+    callback open-location(string);
+
+    callback scan-all();
+    callback analyze();
+    callback clean();
+    callback scan-reg();
+    callback fix-reg();
+    callback refresh-start();
+    callback toggle-cat(int);
+    callback select-safe();
+    callback toggle-issue(int);
+    callback select-all-issues();
+    callback select-start-tab(int);
+    callback set-show-system(bool);
+    callback toggle-start(int, bool);
+    callback delete-start(int);
+    callback open-backups();
+    callback open-report();
+    callback toggle-keep-recent(bool);
+    callback page-moved(int);
+    callback restart-admin();
+    callback window-changed();
+    callback toggle-theme();
+    callback toggle-lang();
+    callback dismiss-low-disk();
+    callback window-drag();
+    callback window-minimize();
+    callback window-maximize();
+    callback window-close();
+    callback window-resize(int);
+    callback dialog-accept();
+    callback dialog-cancel();
+}

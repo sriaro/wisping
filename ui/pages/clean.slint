@@ -1,0 +1,269 @@
+import { Theme, T, AppState, CatItem } from "../theme.slint";
+import { Glass, Chip, Pill, PrimaryButton, SecondaryButton, IconButton, RoundCheck, ListGroup, ProgressStrip, Toggle } from "../widgets.slint";
+import { PageFrame, PageHead } from "common.slint";
+import { Intro, FadeText, Rise } from "../motion.slint";
+
+component CatRow inherits Rise {
+    in property <CatItem> item;
+    in property <bool> last: false;
+    in property <bool> shown: true;
+    callback activated;
+    callback details;
+    height: 58px;
+    visible: shown;
+    property <float> a: root.v * (root.item.locked ? 0.6 : 1);
+
+    Rectangle {
+        x: 6px;
+        y: 3px;
+        width: parent.width - 12px;
+        height: parent.height - 6px;
+        border-radius: 11px;
+        background: ta.has-hover && !root.item.locked ? Theme.hover : Theme.hover.transparentize(1);
+        opacity: root.v;
+        animate background { duration: 140ms; }
+    }
+
+    if !root.last: Rectangle {
+        x: 103px;
+        y: parent.height - 1px;
+        width: parent.width - 103px - 14px;
+        height: 1px;
+        background: Theme.sep.transparentize(1 - root.a);
+    }
+
+    ta := TouchArea {
+        mouse-cursor: root.item.locked ? default : pointer;
+        clicked => {
+            if (!root.item.locked) {
+                root.activated();
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 13px;
+        RoundCheck {
+            fade: root.a;
+            checked: root.item.selected && !root.item.locked;
+            enabled: !root.item.locked;
+            y: (parent.height - self.height) / 2;
+        }
+        Chip {
+            fade: root.a;
+            icon: root.item.icon;
+            tint: root.item.tint;
+            size: 37px;
+            y: (parent.height - self.height) / 2;
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            horizontal-stretch: 1;
+            Text {
+                opacity: root.a;
+                text: root.item.name;
+                color: Theme.text;
+                font-size: 13.5px;
+                font-weight: Theme.semi;
+                overflow: elide;
+            }
+            Text {
+                opacity: root.a;
+                text: root.item.desc;
+                color: Theme.text-dim;
+                font-size: 11px;
+                overflow: elide;
+            }
+        }
+        Pill {
+            fade: root.a;
+            text: root.item.risk;
+            fg: root.item.risk-tone == 0 ? Theme.ok : root.item.risk-tone == 1 ? Theme.warn : Theme.danger;
+            bg: root.item.risk-tone == 0 ? Theme.ok-soft : root.item.risk-tone == 1 ? Theme.warn-soft : Theme.danger-soft;
+            y: (parent.height - self.height) / 2;
+        }
+        if root.item.locked: Pill {
+            fade: root.a;
+            text: T.s("badge.admin");
+            fg: Theme.warn;
+            bg: Theme.warn-soft;
+            y: (parent.height - self.height) / 2;
+        }
+        IconButton {
+            fade: root.a;
+            icon: "search";
+            size: 30px;
+            enabled: root.item.scanned;
+            y: (parent.height - self.height) / 2;
+            clicked => {
+                root.details();
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            width: 77px;
+            FadeText {
+                fade: root.a;
+                height: 18px;
+                text: root.item.scanned ? root.item.size : "—";
+                fg: Theme.text;
+                font-size: 13.5px;
+                font-weight: 700;
+                horizontal-alignment: right;
+            }
+            FadeText {
+                fade: root.a;
+                height: 14px;
+                text: root.item.scanned ? root.item.count : "";
+                fg: Theme.text-dim;
+                font-size: 11px;
+                horizontal-alignment: right;
+            }
+        }
+    }
+
+}
+
+export component CleanPage inherits PageFrame {
+    VerticalLayout {
+        spacing: 14.5px;
+        PageHead {
+            title: T.s("clean.title");
+            sub: T.s("clean.sub");
+        }
+        Glass {
+            height: 45px;
+            radius: 17.5px;
+            HorizontalLayout {
+                padding-left: 21px;
+                padding-right: 11px;
+                spacing: 9.5px;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 2px;
+                    horizontal-stretch: 1;
+                    Text {
+                        opacity: Theme.page-a;
+                        text: T.s("age.title");
+                        color: Theme.text;
+                        font-size: 12px;
+                        font-weight: Theme.semi;
+                    }
+                    Text {
+                        opacity: Theme.page-a;
+                        text: AppState.keep-recent ? T.s("age.on") : T.s("age.off");
+                        color: Theme.text-dim;
+                        font-size: 11px;
+                        overflow: elide;
+                    }
+                }
+                Toggle {
+                    on: AppState.keep-recent;
+                    enabled: !AppState.busy;
+                    y: (parent.height - self.height) / 2;
+                    toggled(v) => {
+                        AppState.toggle-keep-recent(v);
+                    }
+                }
+            }
+        }
+        Rectangle {
+            vertical-stretch: 1;
+            lg := ListGroup {
+                limit: parent.height;
+                width: parent.width;
+                for item[i] in AppState.cats: VerticalLayout {
+                    if i == 0 || AppState.cats[i - 1].group != item.group: HorizontalLayout {
+                        padding-left: 22px;
+                        height: 36px;
+                        Text {
+                            opacity: Theme.page-a;
+                            text: item.group;
+                            color: Theme.text-dim;
+                            font-size: 11.5px;
+                            font-weight: 700;
+                            vertical-alignment: bottom;
+                        }
+                    }
+                    CatRow {
+                        order: i;
+                        shown: self.absolute-position.y + self.height > lg.absolute-position.y && self.absolute-position.y < lg.absolute-position.y + lg.height;
+                        item: item;
+                        last: i == AppState.cats.length - 1 || AppState.cats[i + 1].group != item.group;
+                        activated => {
+                            AppState.toggle-cat(i);
+                        }
+                        details => {
+                            AppState.show-details(i);
+                        }
+                    }
+                }
+            }
+        }
+        Glass {
+            height: 57.5px;
+            radius: 17.5px;
+            strong: true;
+            HorizontalLayout {
+                padding-left: 21px;
+                padding-right: 11px;
+                spacing: 9.5px;
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 5px;
+                    horizontal-stretch: 1;
+                    Text {
+                        opacity: Theme.page-a;
+                        text: AppState.busy ? AppState.status : AppState.clean-selected-text;
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: Theme.semi;
+                        overflow: elide;
+                    }
+                    ProgressStrip {
+                        active: AppState.busy;
+                    }
+                }
+                if AppState.has-report: SecondaryButton {
+                    text: T.s("btn.report");
+                    icon: "file";
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.open-report();
+                    }
+                }
+                SecondaryButton {
+                    text: T.s("btn.safe");
+                    icon: "shield";
+                    enabled: !AppState.busy;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.select-safe();
+                    }
+                }
+                SecondaryButton {
+                    text: T.s("btn.analyze");
+                    icon: "search";
+                    enabled: !AppState.busy;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.analyze();
+                    }
+                }
+                PrimaryButton {
+                    text: T.s("btn.clean");
+                    icon: "sparkles";
+                    enabled: !AppState.busy && AppState.can-run-clean;
+                    y: (parent.height - self.height) / 2;
+                    clicked => {
+                        AppState.clean();
+                    }
+                }
+            }
+        }
+    }
+}

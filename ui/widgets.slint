@@ -1,0 +1,723 @@
+import { Theme, Geo } from "theme.slint";
+import { Intro, FadeText } from "motion.slint";
+
+export component Icon inherits Image {
+    in property <string> kind;
+    in property <length> size: 16px;
+    width: size;
+    height: size;
+    image-fit: contain;
+    source: kind == "sparkles" ? @image-url("icons/sparkles.svg")
+        : kind == "trash" ? @image-url("icons/trash.svg")
+        : kind == "database" ? @image-url("icons/database.svg")
+        : kind == "power" ? @image-url("icons/power.svg")
+        : kind == "folder" ? @image-url("icons/folder.svg")
+        : kind == "grid" ? @image-url("icons/grid.svg")
+        : kind == "image" ? @image-url("icons/image.svg")
+        : kind == "clock" ? @image-url("icons/clock.svg")
+        : kind == "alert" ? @image-url("icons/alert.svg")
+        : kind == "cpu" ? @image-url("icons/cpu.svg")
+        : kind == "download" ? @image-url("icons/download.svg")
+        : kind == "share" ? @image-url("icons/share.svg")
+        : kind == "file" ? @image-url("icons/file.svg")
+        : kind == "globe" ? @image-url("icons/globe.svg")
+        : kind == "zap" ? @image-url("icons/zap.svg")
+        : kind == "sun" ? @image-url("icons/sun.svg")
+        : kind == "moon" ? @image-url("icons/moon.svg")
+        : kind == "check" ? @image-url("icons/check.svg")
+        : kind == "shield" ? @image-url("icons/shield.svg")
+        : kind == "shield-alert" ? @image-url("icons/shield-alert.svg")
+        : kind == "refresh" ? @image-url("icons/refresh.svg")
+        : kind == "x" ? @image-url("icons/x.svg")
+        : kind == "search" ? @image-url("icons/search.svg")
+        : kind == "wrench" ? @image-url("icons/wrench.svg")
+        : kind == "archive" ? @image-url("icons/archive.svg")
+        : kind == "chevron" ? @image-url("icons/chevron.svg")
+        : kind == "box" ? @image-url("icons/box.svg")
+        : @image-url("icons/key.svg");
+}
+
+export component Sq inherits Rectangle {
+    in property <float> r: 22;
+    in property <brush> colorize: transparent;
+    in property <brush> edge: transparent;
+    in property <length> edge-width: 0px;
+    in property <float> fade: 1;
+    width: 100%;
+    height: 100%;
+    Path {
+        opacity: root.fade;
+        width: parent.width;
+        height: parent.height;
+        commands: Geo.squircle(self.width / 1px - root.edge-width / 1px, self.height / 1px - root.edge-width / 1px, root.r * 1.45, root.edge-width / 2px);
+        fill: root.colorize;
+        stroke: root.edge-width > 0 ? root.edge : transparent;
+        stroke-width: root.edge-width;
+    }
+}
+
+export component SoftShadow inherits Rectangle {
+    in property <color> tint: Theme.shadow;
+    in property <length> blur: 14px;
+    in property <length> dy: 4px;
+    in property <length> corner: 17.5px;
+    in property <float> fade: 1;
+    property <int> kind: root.blur >= 30px ? 3 : root.blur >= 20px ? 4 : root.blur >= 15px ? 6 : root.blur <= 10px ? 5 : root.corner >= 22px ? 1 : root.corner >= 19px ? 2 : 0;
+    property <length> reach: root.kind == 3 ? 50px : root.kind == 4 ? 30px : root.kind == 6 ? 20px : root.kind == 5 ? 10px : 18px;
+
+    Image {
+        x: -root.reach;
+        y: -root.reach + root.dy;
+        width: root.width + 2 * root.reach;
+        height: root.height + 2 * root.reach;
+        colorize: root.tint.with-alpha(1);
+        opacity: root.tint.alpha / 255 * 0.62 * root.fade;
+        source: root.kind == 0 ? @image-url("art/shadow-0.png", nine-slice(36))
+            : root.kind == 1 ? @image-url("art/shadow-1.png", nine-slice(42))
+            : root.kind == 2 ? @image-url("art/shadow-2.png", nine-slice(38))
+            : root.kind == 3 ? @image-url("art/shadow-3.png", nine-slice(82))
+            : root.kind == 5 ? @image-url("art/shadow-5.png", nine-slice(26))
+            : root.kind == 6 ? @image-url("art/shadow-6.png", nine-slice(36))
+            : @image-url("art/shadow-4.png", nine-slice(54));
+    }
+}
+
+export component Glass inherits Rectangle {
+    in property <length> radius: 17.5px;
+    in property <bool> hot: false;
+    in property <bool> strong: false;
+    in property <bool> flat: false;
+    in property <float> fade: Theme.page-a;
+    property <bool> big: radius >= 21px;
+
+    if !root.flat: SoftShadow {
+        fade: root.fade;
+        corner: root.big ? 24px : 17.5px;
+    }
+
+    Sq {
+        fade: root.fade;
+        r: root.big ? 24 : 18;
+        colorize: root.strong ? Theme.card-strong : Theme.card;
+        edge: root.hot ? Theme.card-border-hot : Theme.card-border;
+        edge-width: 1px;
+        animate colorize, edge { duration: Theme.calm ? 0ms : 220ms; easing: ease-out; }
+    }
+
+    @children
+}
+
+export component Chip inherits Rectangle {
+    in property <string> icon;
+    in property <int> tint: 1;
+    in property <length> size: 35px;
+    in property <float> fade: Theme.page-a;
+    width: size;
+    height: size;
+    Sq {
+        r: 9.5;
+        fade: root.fade;
+        colorize: Theme.tint-bg(root.tint);
+        animate colorize { duration: Theme.calm ? 0ms : 220ms; }
+    }
+    Icon {
+        kind: root.icon;
+        size: root.size * 0.5;
+        opacity: root.fade;
+        colorize: Theme.tint-fg(root.tint);
+        animate colorize { duration: Theme.calm ? 0ms : 220ms; }
+    }
+}
+
+export component Pill inherits Rectangle {
+    in property <string> text;
+    in property <color> fg: Theme.text-dim;
+    in property <color> bg: Theme.hover;
+    in property <float> fade: Theme.page-a;
+    height: 19px;
+    border-radius: 9.5px;
+    background: bg.transparentize(1 - root.fade);
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        alignment: center;
+        Text {
+            text: root.text;
+            color: root.fg;
+            opacity: root.fade;
+            font-size: 11px;
+            font-weight: Theme.semi;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component PrimaryButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> enabled: true;
+    in property <bool> danger: false;
+    in property <float> fade: Theme.page-a;
+    callback clicked;
+    property <float> en: enabled ? 1 : 0.4;
+    property <float> a: root.en * root.fade;
+    height: 37px;
+    border-radius: 18.5px;
+    transform-scale: ta.pressed && root.enabled ? 0.97 : 1.0;
+    animate transform-scale { duration: 200ms; easing: spring(0); }
+    animate en { duration: 160ms; }
+
+    SoftShadow {
+        tint: root.enabled ? Theme.glow : transparent;
+        blur: 16px;
+        dy: 5px;
+        fade: root.a;
+    }
+
+    Rectangle {
+        border-radius: root.border-radius;
+        border-width: 1px;
+        border-color: Theme.dark ? #ffffff1c : #ffffff55;
+        background: root.danger ? Theme.danger : Theme.accent-gradient;
+        opacity: root.a;
+    }
+
+    Rectangle {
+        x: 5px;
+        y: 2px;
+        width: parent.width - 9.5px;
+        height: parent.height * 0.5;
+        border-radius: self.height / 2;
+        opacity: root.a;
+        background: Theme.dark ? @linear-gradient(180deg, #ffffff26 0%, #ffffff00 100%) : @linear-gradient(180deg, #ffffff55 0%, #ffffff00 100%);
+    }
+
+    Rectangle {
+        border-radius: root.border-radius;
+        opacity: root.a;
+        background: !root.enabled ? transparent : ta.pressed ? #00000030 : ta.has-hover ? #ffffff26 : transparent;
+        animate background { duration: 120ms; }
+    }
+
+    HorizontalLayout {
+        padding-left: 17.5px;
+        padding-right: 17.5px;
+        spacing: 6.5px;
+        alignment: center;
+        if root.icon != "": Icon {
+            kind: root.icon;
+            size: 14.5px;
+            colorize: #ffffff;
+            opacity: root.a;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.text;
+            opacity: root.a;
+            color: #ffffff;
+            font-size: 13px;
+            font-weight: Theme.semi;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            if (root.enabled) {
+                root.clicked();
+            }
+        }
+    }
+}
+
+export component SecondaryButton inherits Rectangle {
+    in property <string> text;
+    in property <string> icon;
+    in property <bool> enabled: true;
+    in property <float> fade: Theme.page-a;
+    callback clicked;
+    property <float> en: enabled ? 1 : 0.4;
+    property <float> a: root.en * root.fade;
+    height: 37px;
+    border-radius: 18.5px;
+    transform-scale: ta.pressed && root.enabled ? 0.97 : 1.0;
+    animate transform-scale { duration: 200ms; easing: spring(0); }
+    animate en { duration: 160ms; }
+
+    SoftShadow {
+        tint: Theme.dark ? #00000030 : Theme.shadow;
+        blur: 8px;
+        dy: 2px;
+        fade: root.a;
+    }
+
+    Rectangle {
+        border-radius: root.border-radius;
+        background: Theme.btn-glass;
+        border-width: 1px;
+        border-color: Theme.card-border;
+        opacity: root.a;
+    }
+
+    Rectangle {
+        border-radius: root.border-radius;
+        opacity: root.a;
+        background: !root.enabled ? transparent : ta.pressed ? Theme.hover : ta.has-hover ? Theme.hover : transparent;
+        animate background { duration: 120ms; }
+    }
+
+    HorizontalLayout {
+        padding-left: 16px;
+        padding-right: 16px;
+        spacing: 6.5px;
+        alignment: center;
+        if root.icon != "": Icon {
+            kind: root.icon;
+            size: 14.5px;
+            colorize: Theme.text;
+            opacity: root.a;
+            y: (parent.height - self.height) / 2;
+        }
+        Text {
+            text: root.text;
+            color: Theme.text;
+            opacity: root.a;
+            font-size: 13px;
+            font-weight: Theme.semi;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            if (root.enabled) {
+                root.clicked();
+            }
+        }
+    }
+}
+
+export component IconButton inherits Rectangle {
+    in property <string> icon;
+    in property <bool> danger: false;
+    in property <bool> enabled: true;
+    in property <length> size: 32px;
+    in property <float> fade: Theme.page-a;
+    callback clicked;
+    property <float> en: enabled ? 1 : 0.35;
+    width: size;
+    height: size;
+    animate en { duration: 160ms; }
+    Rectangle {
+        border-radius: root.size / 2;
+        opacity: root.en * root.fade;
+        background: ta.has-hover && root.enabled ? (root.danger ? Theme.danger-soft : Theme.hover) : transparent;
+        animate background { duration: 140ms; }
+    }
+    Icon {
+        kind: root.icon;
+        size: root.size * 0.5;
+        opacity: root.en * root.fade;
+        colorize: root.danger ? Theme.danger : Theme.text-dim;
+    }
+    ta := TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            if (root.enabled) {
+                root.clicked();
+            }
+        }
+    }
+}
+
+export component Toggle inherits Rectangle {
+    in property <bool> on: false;
+    in property <bool> enabled: true;
+    in property <float> fade: Theme.page-a;
+    callback toggled(bool);
+    property <float> en: enabled ? 1 : 0.4;
+    property <float> lit: on ? 1 : 0;
+    property <float> a: root.en * root.fade;
+    width: 44px;
+    height: 26px;
+    border-radius: 13px;
+    background: Theme.switch-off.transparentize(1 - root.a);
+    animate en { duration: 160ms; }
+    animate lit { duration: 200ms; }
+
+    Rectangle {
+        border-radius: 13px;
+        background: Theme.accent-gradient;
+        opacity: root.lit * root.a;
+    }
+
+    Rectangle {
+        opacity: root.a;
+        width: 21px;
+        height: 21px;
+        y: (root.height - self.height) / 2;
+        x: root.on ? root.width - self.width - (root.height - self.height) / 2 : (root.height - self.height) / 2;
+        border-radius: 10.5px;
+        background: #ffffff;
+        border-width: 1px;
+        border-color: #00000014;
+        animate x { duration: 300ms; easing: spring(0.2); }
+    }
+
+    TouchArea {
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => {
+            if (root.enabled) {
+                root.toggled(!root.on);
+            }
+        }
+    }
+}
+
+export component RoundCheck inherits Rectangle {
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    in property <float> fade: Theme.page-a;
+    property <float> en: enabled ? 1 : 0.35;
+    property <float> lit: checked ? 1 : 0;
+    property <float> a: root.en * root.fade;
+    width: 21px;
+    height: 21px;
+    border-radius: 10.5px;
+    background: transparent;
+    border-width: checked ? 0px : 2px;
+    border-color: Theme.check-border.transparentize(1 - root.a);
+    animate en { duration: 160ms; }
+    animate lit { duration: 140ms; }
+    Rectangle {
+        border-radius: 10.5px;
+        background: Theme.accent-gradient;
+        opacity: root.lit * root.a;
+    }
+    Icon {
+        kind: "check";
+        size: 13px;
+        colorize: #ffffff;
+        opacity: root.lit * root.a;
+    }
+}
+
+export component Scroller inherits Rectangle {
+    out property <length> total-height: vl.preferred-height;
+    out property <length> scroll-y: -fl.content-y;
+    property <bool> scrolling: false;
+    clip: true;
+
+    hide-timer := Timer {
+        interval: 900ms;
+        running: false;
+        triggered => {
+            root.scrolling = false;
+            self.running = false;
+        }
+    }
+
+    fl := Flickable {
+        width: root.width;
+        height: root.height;
+        content-width: self.width;
+        content-height: vl.preferred-height;
+        changed viewport-y => {
+            root.scrolling = true;
+            hide-timer.running = false;
+            hide-timer.running = true;
+        }
+        vl := VerticalLayout {
+            width: fl.width;
+            @children
+        }
+    }
+
+    Rectangle {
+        property <length> thumb-h: max(32px, root.height * root.height / max(fl.content-height, 1px));
+        property <length> travel: root.height - 12px - thumb-h;
+        property <length> span: max(fl.content-height - root.height, 1px);
+        visible: fl.content-height > root.height + 1px;
+        x: root.width - 5px;
+        y: 6px + min(max(-fl.content-y / span, 0), 1) * travel;
+        width: 3px;
+        height: thumb-h;
+        property <float> show: root.scrolling || hover-ta.has-hover ? 0.85 : 0;
+        animate show { duration: 260ms; }
+        Rectangle {
+            border-radius: 2px;
+            background: Theme.scroll-thumb;
+            opacity: parent.show;
+            visible: parent.show > 0.001;
+        }
+        hover-ta := TouchArea {}
+    }
+}
+
+export component ListGroup inherits Rectangle {
+    in property <length> limit: 0px;
+    in property <float> fade: Theme.page-a;
+    out property <length> scroll-y: sc.scroll-y;
+    y: 0px;
+    height: min(limit, sc.total-height + 2px);
+    group-intro := Intro {}
+
+    SoftShadow {
+        corner: 20px;
+        fade: group-intro.v * root.fade;
+    }
+
+    Sq {
+        fade: group-intro.v * root.fade;
+        r: 18;
+        colorize: Theme.card;
+        edge: Theme.card-border;
+        edge-width: 1px;
+    }
+
+    Rectangle {
+        x: 1px;
+        y: 1px;
+        width: root.width - 2px;
+        height: root.height - 2px;
+        border-radius: 17px;
+        clip: true;
+        sc := Scroller {
+            @children
+        }
+    }
+}
+
+export component ProgressStrip inherits Rectangle {
+    in property <bool> active: false;
+    in property <float> fade: Theme.page-a;
+    height: 3px;
+    Rectangle {
+        border-radius: 2px;
+        background: (root.active ? Theme.ring-track : transparent).transparentize(1 - root.fade);
+    }
+    Rectangle {
+        clip: true;
+        Rectangle {
+            visible: root.active;
+            opacity: root.fade;
+            width: root.width * 0.35;
+            height: root.height;
+            border-radius: 2px;
+            background: Theme.accent;
+            x: -self.width + (root.width + self.width) * mod(animation-tick() / 1.3s, 1);
+        }
+    }
+}
+
+export component HeroRing inherits Rectangle {
+    in property <int> mode: 0;
+    in property <string> big;
+    in property <string> small;
+    in property <float> fade: Theme.page-a;
+    width: 176px;
+    height: 176px;
+    property <angle> a0: mod(animation-tick() / 1.2s, 1) * 360deg;
+    property <float> full: root.mode == 2 ? 1 : 0;
+    property <float> arc: root.mode == 1 ? 1 : 0;
+    animate full { duration: 360ms; easing: ease-out; }
+    animate arc { duration: 260ms; easing: ease-out; }
+
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: 88px;
+        border-width: 11px;
+        border-color: Theme.ring-track.transparentize(1 - root.fade);
+    }
+
+    Image {
+        width: 176px;
+        height: 176px;
+        source: Theme.dark ? @image-url("art/ring-full-dark.png") : @image-url("art/ring-full.png");
+        opacity: root.full * root.fade;
+        visible: root.full > 0.01;
+    }
+
+    Image {
+        width: 176px;
+        height: 176px;
+        source: Theme.dark ? @image-url("art/ring-arc-dark.png") : @image-url("art/ring-arc.png");
+        opacity: root.arc * root.fade;
+        visible: root.arc > 0.01;
+        transform-rotation: root.a0;
+    }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 5px;
+        if root.mode == 0: Icon {
+            kind: "sparkles";
+            size: 43px;
+            colorize: Theme.accent;
+            opacity: root.fade;
+            x: (parent.width - self.width) / 2;
+        }
+        if root.mode == 2: FadeText {
+            fade: root.fade;
+            text: root.big;
+            fg: Theme.text;
+            font-size: 29px;
+            font-weight: 700;
+            horizontal-alignment: center;
+            intro: true;
+        }
+        FadeText {
+            fade: root.fade;
+            text: root.small;
+            fg: Theme.text-dim;
+            font-size: 12px;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+export component SegTabs inherits Rectangle {
+    in property <[string]> names;
+    in property <int> current: 0;
+    callback selected(int);
+    property <length> pad: 3px;
+    property <length> gap: 2px;
+    property <length> cell: root.names.length > 0 ? (root.width - 2 * root.pad - root.gap * (root.names.length - 1)) / root.names.length : 0px;
+    property <bool> thumb-pressed: false;
+    property <float> press: root.thumb-pressed ? 0.72 : 1;
+    animate press { duration: 110ms; }
+    property <float> pos: root.current;
+    animate pos { duration: 320ms; easing: spring(0.1); }
+    in property <float> fade: Theme.page-a;
+    height: 38px;
+    border-radius: 19px;
+    background: Theme.chip-bg.transparentize(1 - root.fade);
+    border-width: 1px;
+    border-color: Theme.card-border.transparentize(1 - root.fade);
+
+    thumb := Rectangle {
+        x: root.pad + root.pos * (root.cell + root.gap);
+        y: root.pad;
+        width: root.cell;
+        height: root.height - 2 * root.pad;
+        border-radius: 16px;
+        background: Theme.nav-active;
+        opacity: root.press * root.fade;
+    }
+
+    for n[i] in root.names: Rectangle {
+        x: root.pad + i * (root.cell + root.gap);
+        y: root.pad;
+        width: root.cell;
+        height: root.height - 2 * root.pad;
+        Rectangle {
+            border-radius: 16px;
+            opacity: root.fade;
+            background: i == root.current ? transparent : (seg-ta.pressed ? Theme.hover : (seg-ta.has-hover ? Theme.hover : transparent));
+            animate background { duration: 140ms; }
+        }
+        Text {
+            text: n;
+            opacity: root.fade;
+            color: i == root.current || seg-ta.has-hover ? Theme.text : Theme.text-dim;
+            font-size: 12.5px;
+            font-weight: Theme.semi;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            overflow: elide;
+            animate color { duration: Theme.calm ? 0ms : 180ms; }
+        }
+        seg-ta := TouchArea {
+            mouse-cursor: pointer;
+            changed pressed => {
+                if (i == root.current) {
+                    root.thumb-pressed = self.pressed;
+                } else if (!self.pressed) {
+                    root.thumb-pressed = false;
+                }
+            }
+            clicked => {
+                root.thumb-pressed = false;
+                if (i != root.current) {
+                    root.selected(i);
+                }
+            }
+        }
+    }
+}
+
+export component SearchBox inherits Rectangle {
+    in property <string> placeholder;
+    in-out property <string> text;
+    in property <float> fade: Theme.page-a;
+    callback changed(string);
+    property <color> edge: input.has-focus ? Theme.card-border-hot : Theme.card-border;
+    animate edge { duration: 160ms; }
+    height: 38px;
+    border-radius: 19px;
+    background: Theme.chip-bg.transparentize(1 - root.fade);
+    border-width: 1px;
+    border-color: root.edge.transparentize(1 - root.fade);
+
+    HorizontalLayout {
+        padding-left: 14px;
+        padding-right: 14px;
+        spacing: 8px;
+        Icon {
+            kind: "search";
+            size: 15px;
+            colorize: Theme.text-dim;
+            opacity: root.fade;
+            y: (parent.height - self.height) / 2;
+        }
+        Rectangle {
+            horizontal-stretch: 1;
+            if root.text == "" && !input.has-focus: Text {
+                x: 0px;
+                width: parent.width;
+                height: parent.height;
+                text: root.placeholder;
+                opacity: root.fade;
+                color: Theme.text-dim;
+                font-size: 12.5px;
+                horizontal-alignment: left;
+                vertical-alignment: center;
+            }
+            input := TextInput {
+                x: 0px;
+                width: parent.width;
+                height: parent.height;
+                text <=> root.text;
+                opacity: root.fade;
+                color: Theme.text;
+                font-size: 12.5px;
+                vertical-alignment: center;
+                single-line: true;
+                selection-background-color: Theme.accent-soft;
+                selection-foreground-color: Theme.text;
+                edited => {
+                    root.changed(self.text);
+                }
+            }
+        }
+        if root.text != "": Rectangle {
+            width: 18px;
+            Icon {
+                kind: "x";
+                size: 13px;
+                colorize: Theme.text-dim;
+                opacity: root.fade;
+            }
+            TouchArea {
+                mouse-cursor: pointer;
+                clicked => {
+                    root.text = "";
+                    root.changed("");
+                }
+            }
+        }
+    }
+}
