@@ -2,6 +2,20 @@
 
 English | [简体中文](README.zh-CN.md)
 
+<details>
+<summary><b>简体中文（点击展开）</b></summary>
+
+便携的单文件 Windows 清理工具，界面支持中文和英文。
+
+- 清理垃圾文件，查找失效的注册表项，管理启动项和已安装程序，分析磁盘占用，并提供少量 Windows 调整。
+- 安全优先：确认之前不会删除任何东西，注册表修复会先备份，所有可选的记录功能默认关闭。
+- 空闲时零开销：没有后台服务，没有事情做的时候也没有定时器。
+- 下载：到 [Releases](https://github.com/sriaro/wisp/releases) 下载 zip，解压后运行 `Wisp.exe`，不需要安装。
+
+完整中文说明见 [README.zh-CN.md](README.zh-CN.md)。
+
+</details>
+
 A portable, single-exe Windows cleaner with an English and Chinese interface. Rust, Slint (femtovg renderer), liquid-glass look.
 
 - Cleans junk files, finds stale registry entries, manages startup items and installed programs, maps disk usage, and offers a few Windows tweaks.
