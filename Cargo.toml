@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.99"
 publish = false
 license = "GPL-3.0-only"
+authors = ["sriaro"]
 
 [[bin]]
 name = "Wisp"

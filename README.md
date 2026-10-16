@@ -60,7 +60,7 @@ Wisp keeps backups, settings, history and the log in a `data` folder next to `Wi
 
 ## Licence
 
-Wisp is free software under the GNU General Public License version 3 only; see `LICENSE`. It is built on Slint, used under its GPL-3.0 option.
+Wisp is free software under the GNU General Public License version 3 only; see `LICENSE`. Copyright (C) 2026 sriaro. Under section 7(b) of that licence, copies and modified versions must keep the author attribution "sriaro"; the exact wording is in `NOTICE`. Wisp is built on Slint, used under its GPL-3.0 option.
 
 Wisp is provided without any warranty (see sections 15 and 16 of the licence). It deletes files and edits the registry only after you confirm; back up anything you cannot lose.
 
