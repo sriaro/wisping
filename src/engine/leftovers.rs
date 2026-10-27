@@ -327,6 +327,7 @@ pub fn recycle(path: &Path) -> io::Result<()> {
     let (Some(parent), Some(name)) = (pinned_parent(path), path.file_name()) else {
         return Err(io::Error::other("refused"));
     };
+    let held = parent.hold_child_dir(name).map_err(|_| io::Error::other("refused"))?;
     let path = parent.path().join(name);
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.extend([0, 0]);
@@ -337,7 +338,9 @@ pub fn recycle(path: &Path) -> io::Result<()> {
         ..Default::default()
     };
     let code = unsafe { SHFileOperationW(&mut op) };
-    if code != 0 || op.fAnyOperationsAborted.as_bool() || path.exists() {
+    let gone = !path.exists();
+    drop(held);
+    if code != 0 || op.fAnyOperationsAborted.as_bool() || !gone {
         return Err(io::Error::other("could not move the folder to the Recycle Bin"));
     }
     Ok(())

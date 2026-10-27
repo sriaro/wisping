@@ -124,6 +124,10 @@ pub fn publisher(path: &str) -> String {
             return v.clone();
     }
     let value = if admin_only(p) { company(p) } else { signer(p).unwrap_or_default() };
-    cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(key, (stamp.0, stamp.1, value.clone()));
+    let mut cached = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cached.len() >= 4096 {
+        cached.clear();
+    }
+    cached.insert(key, (stamp.0, stamp.1, value.clone()));
     value
 }

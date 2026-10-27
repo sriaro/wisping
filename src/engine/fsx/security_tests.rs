@@ -136,3 +136,55 @@ fn security_output_retains_identity_and_preserves_normal_writes() {
     }
     assert_eq!(fs::read_to_string(root.join("history.txt")).unwrap(), "two\nthree\n");
 }
+
+#[test]
+fn security_pins_descend_under_a_shared_prefix() {
+    let base = fixture("pins-under");
+    let nested = base.join("a").join("b");
+    fs::create_dir_all(&nested).unwrap();
+    let root = PinnedDir::open(&base).unwrap();
+    assert_eq!(root.under(&nested).unwrap().path(), nested.as_path());
+    assert_eq!(root.under(&base).unwrap().path(), base.as_path());
+    assert!(root.under(&base.join("missing")).is_err());
+    assert!(root.under(Path::new("C:\\")).is_err());
+    junction(&base.join("link"), &nested);
+    assert!(root.under(&base.join("link")).is_err());
+    assert_eq!(fixed_prefix("C:\\Users\\*\\AppData"), Some(PathBuf::from("C:\\Users")));
+    assert_eq!(fixed_prefix("C:\\Users\\Public"), Some(PathBuf::from("C:\\Users\\Public")));
+    assert_eq!(fixed_prefix("relative\\*"), None);
+}
+
+#[test]
+fn security_history_append_reads_only_the_tail() {
+    let base = fixture("append-tail");
+    let dir = PinnedDir::open(&base).unwrap();
+    let big: String = (0..100_000).map(|i| format!("line {i:08}\n")).collect();
+    fs::write(base.join("history.txt"), &big).unwrap();
+    dir.append_lines(OsStr::new("history.txt"), "last\n", 600).unwrap();
+    let text = fs::read_to_string(base.join("history.txt")).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 600);
+    assert_eq!(lines[0], "line 00099401");
+    assert_eq!(lines[599], "last");
+}
+
+#[test]
+fn security_copy_refuses_a_dangling_destination_link() {
+    let base = fixture("copy-dangling");
+    let from = base.join("from");
+    let to = base.join("to");
+    let outside = base.join("outside");
+    for directory in [&from, &to, &outside] {
+        fs::create_dir(directory).unwrap();
+    }
+    fs::write(from.join("settings.txt"), b"settings").unwrap();
+    let redirected = outside.join("planted.txt");
+    if std::os::windows::fs::symlink_file(&redirected, to.join("settings.txt")).is_err() {
+        return;
+    }
+    let source = PinnedDir::open(&from).unwrap();
+    let target = PinnedDir::open(&to).unwrap();
+    assert!(source.copy_file_to(OsStr::new("settings.txt"), &target).is_err());
+    assert!(!redirected.exists());
+    assert_eq!(fs::read(from.join("settings.txt")).unwrap(), b"settings");
+}

@@ -12,7 +12,7 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
     FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
     FILE_DISPOSITION_INFO_EX_FLAGS, FILE_NAME_NORMALIZED, FILE_NAME_OPENED, FileDispositionInfo, FileDispositionInfoEx, GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW,
-    BY_HANDLE_FILE_INFORMATION, CopyFileW, GetDriveTypeW, GetFileInformationByHandle, SetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FileBasicInfo, GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx, SetFileInformationByHandle,
 };
 use windows::core::PCWSTR;
 
@@ -262,6 +262,21 @@ pub fn expand_dirs(pattern: &str) -> Vec<PathBuf> {
     current
 }
 
+pub fn fixed_prefix(pattern: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(expand_env(pattern));
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(p) => out.push(p.as_os_str()),
+            Component::RootDir => out.push("\\"),
+            Component::Normal(s) if !has_wildcard(&s.to_string_lossy()) => out.push(s),
+            Component::Normal(_) => break,
+            _ => return None,
+        }
+    }
+    (!out.as_os_str().is_empty() && out.has_root()).then_some(out)
+}
+
 pub fn newest(meta: &fs::Metadata) -> Option<SystemTime> {
     match (meta.modified(), meta.created()) {
         (Ok(a), Ok(b)) => Some(a.max(b)),
@@ -360,6 +375,21 @@ fn child_name(name: &OsStr) -> io::Result<()> {
         return Err(refused_path());
     }
     Ok(())
+}
+
+fn copy_basic_info(from: &File, to: &File) -> io::Result<()> {
+    const PLAIN_ATTRIBUTES: u32 = 0x1 | 0x2 | 0x4 | 0x20 | 0x100 | 0x2000;
+    let mut info = FILE_BASIC_INFO::default();
+    let size = std::mem::size_of::<FILE_BASIC_INFO>() as u32;
+    unsafe { GetFileInformationByHandleEx(HANDLE(from.as_raw_handle()), FileBasicInfo, (&mut info as *mut FILE_BASIC_INFO).cast(), size) }
+        .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xffff))?;
+    info.FileAttributes &= PLAIN_ATTRIBUTES;
+    if info.FileAttributes == 0 {
+        info.FileAttributes = 0x80;
+    }
+    info.ChangeTime = 0;
+    unsafe { SetFileInformationByHandle(HANDLE(to.as_raw_handle()), FileBasicInfo, (&info as *const FILE_BASIC_INFO).cast(), size) }
+        .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xffff))
 }
 
 fn handle_is_child(file: &File, parent: &File) -> bool {
@@ -487,6 +517,28 @@ impl PinnedDir {
         self.child_with_access(name, false, READ_ATTRIBUTES | DELETE)
     }
 
+    pub fn under(&self, path: &Path) -> io::Result<Self> {
+        let rest = path.strip_prefix(&self.path).map_err(|_| refused_path())?;
+        let mut dir = Self { path: self.path.clone(), pins: self.pins.clone() };
+        for part in rest.components() {
+            match part {
+                Component::Normal(name) => dir = dir.child(name, false)?,
+                _ => return Err(refused_path()),
+            }
+        }
+        Ok(dir)
+    }
+
+    pub fn hold_child_dir(&self, name: &OsStr) -> io::Result<File> {
+        child_name(name)?;
+        let file = OpenOptions::new().access_mode(READ_ATTRIBUTES).share_mode(SHARE_ALL).custom_flags(OPEN_REPARSE_POINT | BACKUP_SEMANTICS).open(self.path.join(name))?;
+        let meta = file.metadata()?;
+        if !meta.is_dir() || attrs_reparse(meta.file_attributes()) || !handle_is_child(&file, self.handle()) {
+            return Err(refused_path());
+        }
+        Ok(file)
+    }
+
     fn child_with_access(&self, name: &OsStr, create: bool, access: u32) -> io::Result<Self> {
         self.child_inner(name, create, access, false)
     }
@@ -571,9 +623,18 @@ impl PinnedDir {
     }
 
     pub fn append_lines(&self, name: &OsStr, line: &str, keep: usize) -> io::Result<()> {
+        const TAIL: u64 = 1 << 20;
         self.update_file(name, |file| {
+            let len = file.metadata()?.len();
             let mut bytes = Vec::new();
+            if len > TAIL {
+                file.seek(SeekFrom::Start(len - TAIL))?;
+            }
             file.read_to_end(&mut bytes)?;
+            if len > TAIL {
+                let cut = bytes.iter().position(|&b| b == b'\n').map_or(bytes.len(), |i| i + 1);
+                bytes.drain(..cut);
+            }
             let mut text = String::from_utf8_lossy(&bytes).into_owned();
             text.push_str(line);
             let lines: Vec<&str> = text.lines().collect();
@@ -585,11 +646,14 @@ impl PinnedDir {
     }
 
     pub fn copy_file_to(&self, name: &OsStr, target: &Self) -> io::Result<()> {
-        let _source = self.read_file(name)?;
-        let from: Vec<u16> = self.path.join(name).as_os_str().encode_wide().chain([0]).collect();
-        let to: Vec<u16> = target.path.join(name).as_os_str().encode_wide().chain([0]).collect();
-        unsafe { CopyFileW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), true) }
-            .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xffff))
+        let mut source = self.read_file(name)?;
+        let mut copy = target.create_file(name)?;
+        let copied = io::copy(&mut source, &mut copy).and_then(|_| copy_basic_info(&source, &copy)).and_then(|_| copy.sync_all());
+        if copied.is_err() {
+            drop(copy);
+            let _ = target.remove_file(name);
+        }
+        copied
     }
 
     fn plain_child(&self, file: &File) -> io::Result<()> {
@@ -638,8 +702,7 @@ impl Fence {
         Self::pinned(&PinnedDir::open(root).ok()?, own)
     }
 
-    pub fn pinned(dir: &PinnedDir, own: &[PathBuf]) -> Option<Fence> {
-        let root = final_path(dir.handle())?;
+    pub fn guard_paths(own: &[PathBuf]) -> Vec<Vec<u16>> {
         let mut guarded = Vec::new();
         for p in own {
             for flags in [OPEN_REPARSE_POINT | BACKUP_SEMANTICS, BACKUP_SEMANTICS] {
@@ -648,10 +711,19 @@ impl Fence {
                 }
             }
         }
+        guarded
+    }
+
+    pub fn pinned(dir: &PinnedDir, own: &[PathBuf]) -> Option<Fence> {
+        Self::guarded(dir, &Self::guard_paths(own))
+    }
+
+    pub fn guarded(dir: &PinnedDir, guarded: &[Vec<u16>]) -> Option<Fence> {
+        let root = final_path(dir.handle())?;
         if guarded.iter().any(|o| same_or_within(&root, o)) {
             return None;
         }
-        Some(Fence { root, own: guarded })
+        Some(Fence { root, own: guarded.to_vec() })
     }
 
     pub fn admits(&self, path: &[u16]) -> bool {

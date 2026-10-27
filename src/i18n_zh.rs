@@ -262,6 +262,7 @@ pub const TABLE: &[(&str, &str)] = &[
     ("msg.nodisable", "这类条目只能移除，不能关闭。"),
     ("msg.locked", "这个条目仅供查看，请用 Windows 自带工具修改。"),
     ("msg.errors", "有 {0} 个条目无法更改："),
+    ("msg.failed", "操作意外中断，请重试。"),
     ("t.usertemp", "临时文件"),
     ("t.wintemp", "Windows 临时文件"),
     ("t.thumb", "缩略图缓存"),

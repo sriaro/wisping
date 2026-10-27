@@ -71,6 +71,7 @@ pub fn idle_on_panic(weak: &Weak<MainWindow>) -> PanicReset {
         let st = ui.global::<AppState>();
         st.set_busy(false);
         st.set_status(i18n::get("status.idle").into());
+        show_error_in(ui, i18n::get("msg.failed"));
     })
 }
 
@@ -124,6 +125,10 @@ pub fn confirm(c: &Ctx, title: String, text: String, ok: String, danger: bool, a
 
 pub fn show_error(c: &Ctx, text: String) {
     let Some(ui) = c.weak.upgrade() else { return };
+    show_error_in(&ui, text);
+}
+
+pub fn show_error_in(ui: &MainWindow, text: String) {
     let st = ui.global::<AppState>();
     st.set_dialog_title(i18n::get("error.title").into());
     st.set_dialog_text(text.into());
@@ -191,25 +196,37 @@ fn start_scan(c: &Ctx, scope: Scope) {
         let _reset = idle_on_panic(&weak);
         let reg_job = (scope != Scope::Targets).then(|| std::thread::spawn(registry::run));
         let start_job = (scope == Scope::All).then(|| std::thread::spawn(startup::list_cached));
+        let mut failed = false;
         if scope != Scope::Registry {
             let mut targets = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).targets.clone();
-            run_parallel(&mut targets, None, cleaner::scan);
-            store_targets(&mut core.lock().unwrap_or_else(std::sync::PoisonError::into_inner), targets);
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_parallel(&mut targets, None, cleaner::scan))).is_ok() {
+                store_targets(&mut core.lock().unwrap_or_else(std::sync::PoisonError::into_inner), targets);
+            } else {
+                failed = true;
+            }
         }
         if let Some(job) = reg_job {
-            let issues = job.join().unwrap_or_default();
-            let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            g.issues = issues;
-            lock_issues(&mut g);
-            g.reg_scanned = true;
+            match job.join() {
+                Ok(issues) => {
+                    let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.issues = issues;
+                    lock_issues(&mut g);
+                    g.reg_scanned = true;
+                }
+                Err(_) => failed = true,
+            }
         }
         if let Some(job) = start_job {
-            let list = job.join().unwrap_or_default();
-            let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            g.startups = list;
-            g.all_scanned = true;
+            match job.join() {
+                Ok(list) => {
+                    let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.startups = list;
+                    g.all_scanned = true;
+                }
+                Err(_) => failed = true,
+            }
         }
-        if scope == Scope::Targets {
+        if scope == Scope::Targets && !failed {
             core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).all_scanned = true;
         }
         crate::engine::drives::refresh();
@@ -217,6 +234,9 @@ fn start_scan(c: &Ctx, scope: Scope) {
             crate::winui::trim_soon();
             ui.global::<AppState>().set_busy(false);
             push_all(&ui, &core.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            if failed {
+                show_error_in(&ui, i18n::get("msg.failed"));
+            }
         });
     });
 }
@@ -550,14 +570,20 @@ fn preload_startups(c: &Ctx) {
 
 fn preload_drives(c: &Ctx) {
     static REFRESHING: AtomicBool = AtomicBool::new(false);
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            REFRESHING.store(false, Ordering::SeqCst);
+        }
+    }
     if REFRESHING.swap(true, Ordering::SeqCst) {
         return;
     }
     let core = c.core.clone();
     let weak = c.weak.clone();
     std::thread::spawn(move || {
+        let _done = Done;
         crate::engine::drives::refresh();
-        REFRESHING.store(false, Ordering::SeqCst);
         let _ = weak.upgrade_in_event_loop(move |ui| {
             push_low_disk(&ui);
             let g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

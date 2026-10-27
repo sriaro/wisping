@@ -229,7 +229,7 @@ fn list_dir(path: &Path, progress: &Progress, linked: &Mutex<HashSet<u128>>) -> 
     let (mut files, mut bytes) = (0u64, 0u64);
     for entry in rd.flatten() {
         let Ok(md) = entry.metadata() else { continue };
-        if fsx::attrs_reparse(md.file_attributes()) {
+        if md.file_type().is_symlink() {
             continue;
         }
         let name = entry.file_name();
@@ -283,7 +283,7 @@ fn work(sh: &Shared) {
                 if sh.pending.load(Ordering::SeqCst) == 0 {
                     return;
                 }
-                q = sh.cv.wait_timeout(q, std::time::Duration::from_millis(100)).unwrap().0;
+                q = sh.cv.wait_timeout(q, std::time::Duration::from_millis(100)).unwrap_or_else(|e| e.into_inner()).0;
             }
         };
         let listing = list_dir(&task.path, sh.progress, &sh.linked);
@@ -357,7 +357,7 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
             });
         }
     });
-    let (mut nodes, mut names) = sh.nodes.into_inner().unwrap();
+    let (mut nodes, mut names) = sh.nodes.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
     nodes.shrink_to_fit();
     names.seal();
     let mut weight = vec![1u32; nodes.len()];

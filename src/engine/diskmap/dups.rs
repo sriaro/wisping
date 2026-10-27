@@ -35,7 +35,7 @@ fn file_id(f: &File) -> Option<u128> {
 
 fn open(path: &std::path::Path) -> Option<File> {
     let md = std::fs::symlink_metadata(path).ok()?;
-    if !md.is_file() || fsx::attrs_cloud(md.file_attributes()) || fsx::attrs_reparse(md.file_attributes()) {
+    if !md.is_file() || fsx::attrs_cloud(md.file_attributes()) {
         return None;
     }
     OpenOptions::new().read(true).share_mode(7).custom_flags(FILE_FLAG_SEQUENTIAL_SCAN.0).open(path).ok()
@@ -116,7 +116,7 @@ pub fn find(tree: &Tree, cancel: &AtomicBool) -> Vec<Group> {
             });
         }
     });
-    let mut groups = out.into_inner().unwrap();
+    let mut groups = out.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
     groups.sort_by_key(|g| std::cmp::Reverse(g.wasted()));
     groups
 }

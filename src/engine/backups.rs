@@ -455,19 +455,22 @@ pub fn delete(id: &str) -> io::Result<()> {
     }
     let root = fsx::PinnedDir::open(&data::backup_root())?;
     let dir = root.deletable_child(id.as_ref())?;
-    if !super::sys::is_admin() && super::regbackup::integrity::has_records()? {
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "This backup set has administrator records. Restart Wisping as administrator to delete it."));
-    }
+    let admin = super::sys::is_admin();
     let mut receipts: Vec<(PathBuf, Vec<u8>)> = Vec::new();
-    if super::sys::is_admin() {
+    if admin || super::regbackup::integrity::has_records()? {
         for file in reg_files(dir.path()) {
             let bytes = read_backup(&file).map_err(|why| io::Error::other(format!("Wisping cannot verify this backup: {why}.")))?;
+            if !admin && super::regbackup::integrity::verify(&file, &bytes)? {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "This backup was created by Wisping as administrator. Restart Wisping as administrator to delete it."));
+            }
             receipts.push((file, bytes));
         }
     }
     remove_one(dir).map_err(|_| io::Error::other("Wisping could not delete that backup."))?;
-    for (file, bytes) in &receipts {
-        let _ = super::regbackup::integrity::forget(file, bytes);
+    if admin {
+        for (file, bytes) in &receipts {
+            let _ = super::regbackup::integrity::forget(file, bytes);
+        }
     }
     data::log(&format!("backup deleted {}", id));
     Ok(())

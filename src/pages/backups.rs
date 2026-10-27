@@ -1,4 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use slint::{ComponentHandle, ModelRc, VecModel};
 
@@ -9,6 +10,11 @@ use crate::{BackupsState, DataItem, MainWindow};
 
 static SHOWN_TAB: AtomicI32 = AtomicI32::new(-1);
 static BUSY: AtomicBool = AtomicBool::new(false);
+static LIST_GEN: AtomicU32 = AtomicU32::new(0);
+
+thread_local! {
+    static LISTED: RefCell<Option<Vec<DataItem>>> = const { RefCell::new(None) };
+}
 
 fn row(id: &str, title: String, desc: String, icon: &str, tint: i32) -> DataItem {
     DataItem { id: id.into(), title: title.into(), desc: desc.into(), state: "".into(), icon: icon.into(), tint, toggle: false, on: false, button: "".into(), enabled: true, deletable: false }
@@ -117,20 +123,39 @@ fn push(ui: &MainWindow) {
         _ => i18n::get("backups.sub.data"),
     };
     st.set_sub(sub.into());
-    st.set_empty(
-        i18n::get(match (tab, settings::history_on()) {
-            (1, true) => "history.empty",
-            (1, false) => "history.off",
-            _ => "backups.empty",
-        })
-        .into(),
-    );
-    let items = match tab {
-        0 => backup_rows(),
-        1 => history_rows(),
-        _ => data_rows(),
-    };
     let keep = SHOWN_TAB.swap(tab, Ordering::SeqCst) == tab;
+    if tab != 0 {
+        st.set_empty(i18n::get(if tab != 1 { "backups.empty" } else if settings::history_on() { "history.empty" } else { "history.off" }).into());
+        show_items(&st, if tab == 1 { history_rows() } else { data_rows() }, keep);
+        return;
+    }
+    let listed = LISTED.with(|l| l.borrow().clone());
+    st.set_empty(if listed.is_some() { i18n::get("backups.empty") } else { String::new() }.into());
+    match listed {
+        Some(items) => show_items(&st, items, keep),
+        None if !keep => st.set_items(ModelRc::new(VecModel::from(Vec::<DataItem>::new()))),
+        None => {}
+    }
+    let generation = LIST_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let items = backup_rows();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if LIST_GEN.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            LISTED.with(|l| *l.borrow_mut() = Some(items.clone()));
+            let st = ui.global::<BackupsState>();
+            if st.get_tab() != 0 {
+                return;
+            }
+            st.set_empty(i18n::get("backups.empty").into());
+            show_items(&st, items, true);
+        });
+    });
+}
+
+fn show_items(st: &BackupsState, items: Vec<DataItem>, keep: bool) {
     if keep {
         if let Some(model) = crate::views::sync_model(&st.get_items(), items) {
             st.set_items(model);

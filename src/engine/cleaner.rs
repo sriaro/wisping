@@ -560,12 +560,14 @@ fn plans(t: &CleanTarget, fenced: bool) -> (Vec<Plan>, Vec<PathBuf>) {
     }
     let mut out = Vec::new();
     let mut refused = Vec::new();
+    let guarded = if fenced { Fence::guard_paths(&own) } else { Vec::new() };
     for (dir, recurse, age, masks) in groups {
+        let base = fenced.then(|| fsx::fixed_prefix(dir).and_then(|p| fsx::PinnedDir::open(&p).ok())).flatten();
         for root in fsx::expand_dirs(dir) {
             if !fsx::local_drive_path(&root.to_string_lossy()) || !temp_named(dir, &root) {
                 continue;
             }
-            let pin = if fenced { fsx::PinnedDir::open(&root).ok() } else { None };
+            let pin = if fenced { base.as_ref().and_then(|b| b.under(&root).ok()).or_else(|| fsx::PinnedDir::open(&root).ok()) } else { None };
             if has_reparse_ancestor(&root) || data::is_own(&root) {
                 continue;
             }
@@ -576,7 +578,7 @@ fn plans(t: &CleanTarget, fenced: bool) -> (Vec<Plan>, Vec<PathBuf>) {
             }
             let fence = match (fenced, &pin) {
                 (false, _) => None,
-                (true, Some(p)) => match Fence::pinned(p, &own) {
+                (true, Some(p)) => match Fence::guarded(p, &guarded) {
                     Some(f) => Some(f),
                     None => continue,
                 },
