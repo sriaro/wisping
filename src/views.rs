@@ -252,6 +252,7 @@ pub fn start_item(e: &StartupEntry, admin: bool, idx: usize) -> StartItem {
         can_toggle: !e.policy && !e.system && !fixed && toggle_ok,
         can_delete: e.kind != StartupKind::Packaged && !e.system && !locked && delete_ok,
         missing: e.missing,
+        locked,
         admin: !e.system && !locked && (needs_admin(e, false) || needs_admin(e, true)) && !admin,
         tag: format!("{}  ·  {}", i18n::get(&format!("role.{}", role.key())), i18n::get(&format!("advice.{}", advice.key()))).into(),
         tone: advice.tone(),
@@ -301,13 +302,14 @@ pub fn push_startups(ui: &MainWindow, core: &Core) {
     let st = ui.global::<AppState>();
     let tab = st.get_start_tab().clamp(0, 3) as usize;
     let show_system = st.get_start_show_system();
-    let shown = |e: &StartupEntry| e.kind.group() == tab && (show_system || !e.system);
+    let visible = |e: &StartupEntry| show_system || !(e.system || e.kind == StartupKind::Advanced);
+    let shown = |e: &StartupEntry| e.kind.group() == tab && visible(e);
     let items: Vec<StartItem> = core.startups.iter().enumerate().filter(|(_, e)| shown(e)).map(|(i, e)| start_item(e, core.admin, i)).collect();
     let on = core.startups.iter().filter(|e| shown(e) && e.enabled).count();
     let total = items.len();
     let names: Vec<slint::SharedString> = (0..4)
         .map(|g| {
-            let n = core.startups.iter().filter(|e| e.kind.group() == g && (show_system || !e.system)).count();
+            let n = core.startups.iter().filter(|e| e.kind.group() == g && visible(e)).count();
             format!("{}  {}", i18n::get(&format!("start.tab.{}", g)), n).into()
         })
         .collect();
@@ -321,8 +323,12 @@ pub fn push_startups(ui: &MainWindow, core: &Core) {
     st.set_start_count_text(i18n::fmt(key, &[&on.to_string(), &total.to_string(), &safe.to_string()]).into());
 }
 
+pub fn startup_app(e: &StartupEntry) -> bool {
+    e.kind.group() == 0 && e.kind != StartupKind::Advanced
+}
+
 pub fn windows_on(core: &Core) -> usize {
-    core.startups.iter().filter(|e| e.kind.group() == 0 && e.enabled).count()
+    core.startups.iter().filter(|e| startup_app(e) && e.enabled).count()
 }
 
 pub fn push_overview_cards(st: &AppState, core: &Core) {
@@ -385,7 +391,7 @@ pub fn push_home(ui: &MainWindow, core: &Core) {
     st.set_ring_big(size.as_str().into());
     st.set_ring_small(i18n::get("ring.done").into());
     st.set_hero_title(if bytes == 0 { i18n::get("hero.clean.title") } else { i18n::fmt("hero.done.title", &[&size]) }.into());
-    st.set_hero_text(i18n::fmt("hero.done.text", &[&core.issues.len().to_string(), &on.to_string(), &core.startups.iter().filter(|e| e.kind.group() == 0).count().to_string()]).into());
+    st.set_hero_text(i18n::fmt("hero.done.text", &[&core.issues.len().to_string(), &on.to_string(), &core.startups.iter().filter(|e| startup_app(e)).count().to_string()]).into());
     st.set_tile_junk(size.as_str().into());
     st.set_tile_reg(core.issues.len().to_string().into());
     st.set_tile_start(on.to_string().into());

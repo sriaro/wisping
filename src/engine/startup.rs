@@ -38,6 +38,7 @@ const SHELL_FOLDERS: [&str; 2] = [
     "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders",
 ];
 const ACTIVE_SETUP: [&str; 2] = ["SOFTWARE\\Microsoft\\Active Setup\\Installed Components", "SOFTWARE\\WOW6432Node\\Microsoft\\Active Setup\\Installed Components"];
+const DEFAULT_SHELL_OBJECTS: [(&str, &str); 1] = [("WebCheck", "{E6FB5E20-DE35-11CF-9C87-00AA005127ED}")];
 
 fn approved(sub: &str) -> String {
     format!("{}\\Explorer\\StartupApproved\\{}", CV, sub)
@@ -241,18 +242,31 @@ fn add_advanced(out: &mut Vec<StartupEntry>) {
                     continue;
                 }
                 let clsid = regbackup::raw_string(&value.bytes).trim().to_string();
-                let (command, system) = clsid_target(&clsid);
-                out.push(advanced(hive, SHELL_OBJECTS, &name, format!("Shell object {}", name), command, true, system));
+                let (command, system, resolved) = clsid_target(&clsid);
+                let system = system || (hive == Hive::Machine && default_shell_object(&name, &clsid));
+                let mut entry = advanced(hive, SHELL_OBJECTS, &name, format!("Shell object {}", name), command, true, system);
+                entry.missing = !resolved;
+                out.push(entry);
             }
         }
         if let Ok(key) = hive.open(EXECUTE_HOOKS) {
             for (name, _) in key.enum_values().flatten() {
-                let (command, system) = clsid_target(&name);
+                let (command, system, resolved) = clsid_target(&name);
                 let shown = super::shellmenu::clsid_name(&name).unwrap_or_else(|| name.clone());
-                out.push(advanced(hive, EXECUTE_HOOKS, &name, format!("Execute hook {}", shown), command, true, system));
+                let mut entry = advanced(hive, EXECUTE_HOOKS, &name, format!("Execute hook {}", shown), command, true, system);
+                entry.missing = !resolved;
+                out.push(entry);
             }
         }
     }
+}
+
+fn default_shell_object(name: &str, clsid: &str) -> bool {
+    DEFAULT_SHELL_OBJECTS.iter().any(|(n, c)| name.eq_ignore_ascii_case(n) && clsid.eq_ignore_ascii_case(c))
+}
+
+fn blank(entry: &str) -> bool {
+    entry.trim_matches(|c: char| c == '"' || c.is_whitespace()).is_empty()
 }
 
 fn multi_string(key: &RegKey, name: &str) -> Option<Vec<String>> {
@@ -265,7 +279,7 @@ fn multi_string(key: &RegKey, name: &str) -> Option<Vec<String>> {
         }
         _ => return None,
     };
-    Some(entries.into_iter().map(|e| e.trim().to_string()).filter(|e| !e.is_empty()).collect())
+    Some(entries.into_iter().map(|e| e.trim().to_string()).filter(|e| !blank(e)).collect())
 }
 
 pub fn system_module(name: &str) -> bool {
@@ -277,13 +291,13 @@ pub fn system_module(name: &str) -> bool {
     fsx::is_protected(&file)
 }
 
-fn clsid_target(clsid: &str) -> (String, bool) {
+fn clsid_target(clsid: &str) -> (String, bool, bool) {
     match super::shellmenu::clsid_server(clsid) {
         Some(server) => {
             let system = fsx::is_protected(&server);
-            (server, system)
+            (server, system, true)
         }
-        None => (clsid.to_string(), false),
+        None => (clsid.to_string(), false, false),
     }
 }
 

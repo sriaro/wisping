@@ -16,6 +16,7 @@ pub enum Advice {
     Safe,
     Caution,
     Keep,
+    Review,
 }
 
 impl Role {
@@ -38,6 +39,7 @@ impl Advice {
             Advice::Safe => "safe",
             Advice::Caution => "caution",
             Advice::Keep => "keep",
+            Advice::Review => "review",
         }
     }
 
@@ -46,6 +48,7 @@ impl Advice {
             Advice::Safe => 0,
             Advice::Caution => 1,
             Advice::Keep => 2,
+            Advice::Review => 3,
         }
     }
 }
@@ -65,15 +68,19 @@ fn has(text: &str, words: &[&str]) -> bool {
 }
 
 pub fn classify(e: &StartupEntry) -> (Role, Advice) {
+    if e.kind == StartupKind::Advanced {
+        return (if e.system { Role::Windows } else { guess(e).0 }, Advice::Review);
+    }
     if e.system {
         return (Role::Windows, Advice::Keep);
     }
     if e.kind == StartupKind::Context {
         return (Role::Menu, Advice::Safe);
     }
-    if e.kind == StartupKind::Advanced {
-        return (Role::App, Advice::Caution);
-    }
+    guess(e)
+}
+
+fn guess(e: &StartupEntry) -> (Role, Advice) {
     if let Some(hit) = super::known::lookup(e) {
         return hit;
     }

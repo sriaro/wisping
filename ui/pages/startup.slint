@@ -51,12 +51,12 @@ component StartRow inherits Rise {
                     height: 7px;
                     y: (parent.height - self.height) / 2;
                     border-radius: 3.5px;
-                    background: (root.item.tone == 0 ? Theme.ok : root.item.tone == 1 ? Theme.warn : Theme.danger).transparentize(1 - root.v);
+                    background: (root.item.tone == 0 ? Theme.ok : root.item.tone == 1 ? Theme.warn : root.item.tone == 2 ? Theme.danger : Theme.text-dim).transparentize(1 - root.v);
                 }
                 Text {
                     opacity: root.v;
                     text: root.item.tag;
-                    color: root.item.tone == 0 ? Theme.ok : root.item.tone == 1 ? Theme.warn : Theme.danger;
+                    color: root.item.tone == 0 ? Theme.ok : root.item.tone == 1 ? Theme.warn : root.item.tone == 2 ? Theme.danger : Theme.text-dim;
                     font-size: 11px;
                     font-weight: Theme.semi;
                     vertical-alignment: center;
@@ -101,7 +101,10 @@ component StartRow inherits Rise {
             bg: Theme.tint-bg(7);
             y: (parent.height - self.height) / 2;
         }
-        Toggle {
+        if root.item.locked: Rectangle {
+            width: 89px;
+        }
+        if !root.item.locked: Toggle {
             fade: root.v;
             on: root.item.enabled;
             enabled: root.item.can-toggle;
@@ -110,7 +113,7 @@ component StartRow inherits Rise {
                 root.toggled(v);
             }
         }
-        IconButton {
+        if !root.item.locked: IconButton {
             fade: root.v;
             icon: "trash";
             danger: true;

@@ -962,6 +962,8 @@ fn classify_tests(log: &mut Log) {
     log.check("known list: packaged task parts", classify(&make(StartupKind::Packaged, "Microsoft.WindowsTerminal / StartTerminalOnLoginTask", "", "", false)) == (Role::Microsoft, Advice::Safe));
     log.check("known list: unknown names fall back to keywords", classify(&make(StartupKind::Service, "Acme Audio Recorder Service", "Acme", "", false)).0 == Role::Hardware);
     log.check("classify menu entries as safe", classify(&make(StartupKind::Context, "Edit with Paint", "", "", false)).1 == Advice::Safe);
+    log.check("classify view-only entries as review", classify(&make(StartupKind::Advanced, "Microsoft Edge", "Microsoft Corporation", "", false)) == (Role::Microsoft, Advice::Review));
+    log.check("classify default view-only entries as windows review", classify(&make(StartupKind::Advanced, "Winlogon Shell", "", "", true)) == (Role::Windows, Advice::Review));
 }
 
 fn programs_tests(log: &mut Log) {

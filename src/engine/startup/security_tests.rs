@@ -177,3 +177,16 @@ fn security_startup_refuses_changes_to_view_only_and_run_once_entries() {
     let mut once = StartupEntry { kind: StartupKind::Run, hive: Hive::User, key_path: format!("{}\\RunOnce", CV), value_name: "x".into(), ..Default::default() };
     assert_eq!(set_enabled(&mut once, false).unwrap_err().to_string(), "nodisable");
 }
+
+#[test]
+fn security_startup_skips_blank_packages_and_knows_default_shell_objects() {
+    assert!(blank("\"\""));
+    assert!(blank(" \" \" "));
+    assert!(blank(""));
+    assert!(!blank("msv1_0"));
+    assert!(!blank("\"scecli\""));
+    assert!(default_shell_object("WebCheck", "{E6FB5E20-DE35-11CF-9C87-00AA005127ED}"));
+    assert!(default_shell_object("webcheck", "{e6fb5e20-de35-11cf-9c87-00aa005127ed}"));
+    assert!(!default_shell_object("WebCheck", "{00000000-0000-0000-0000-000000000000}"));
+    assert!(!default_shell_object("Other", "{E6FB5E20-DE35-11CF-9C87-00AA005127ED}"));
+}
