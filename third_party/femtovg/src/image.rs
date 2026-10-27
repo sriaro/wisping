@@ -12,6 +12,10 @@ use std::convert::TryFrom;
 
 use crate::{ErrorKind, Renderer};
 
+#[cfg(test)]
+#[path = "image/security_tests.rs"]
+mod security_tests;
+
 /// An image handle.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ImageId(DefaultKey);
@@ -65,6 +69,26 @@ pub enum ImageSource<'a> {
 }
 
 impl ImageSource<'_> {
+    /// Checks that every advertised pixel is present in the backing buffer.
+    pub fn check_data(&self) -> Result<(), ErrorKind> {
+        fn check<T>(img: ImgRef<'_, T>) -> Result<(), ErrorKind> {
+            let required = img.height().checked_sub(1)
+                .and_then(|rows| rows.checked_mul(img.stride()))
+                .and_then(|offset| offset.checked_add(img.width()));
+            let valid = img.width() > 0 && img.height() > 0 && img.stride() >= img.width()
+                && img.width() <= i32::MAX as usize && img.height() <= i32::MAX as usize
+                && required.is_some_and(|len| len <= img.buf().len());
+            if valid { Ok(()) } else { Err(ErrorKind::InvalidImageData) }
+        }
+        match self {
+            Self::Rgb(img) => check(*img),
+            Self::Rgba(img) => check(*img),
+            Self::Gray(img) => check(*img),
+            #[cfg(target_arch = "wasm32")]
+            Self::HtmlImageElement(_) | Self::HtmlCanvasElement(_) => Ok(()),
+        }
+    }
+
     /// Returns the format of the image source.
     pub fn format(&self) -> PixelFormat {
         match self {
@@ -97,17 +121,18 @@ impl ImageSource<'_> {
     /// that reaches past the destination, or that carries a pixel format the
     /// destination was not created with, is a caller mistake and has to be
     /// reported as [`ErrorKind::ImageUpdateOutOfBounds`] or
-    /// [`ErrorKind::ImageUpdateWithDifferentFormat`]. Passing one down to the
+    /// [`ErrorKind::ImageUpdateWithDifferentFormat`]. Incomplete source storage
+    /// is reported as [`ErrorKind::InvalidImageData`]. Passing one down to the
     /// graphics API instead produces a driver side validation failure, which
     /// backends are generally not able to turn back into a recoverable error:
     /// the usual outcome is an abort that takes the whole process, or on wasm
     /// the whole application, rather than the single failed call.
     pub fn check_update(&self, info: &ImageInfo, x: usize, y: usize) -> Result<(), ErrorKind> {
+        self.check_data()?;
         let size = self.dimensions();
 
-        // Saturating, so that an origin close to `usize::MAX` reports the error
-        // rather than wrapping into a range that looks valid.
-        if x.saturating_add(size.width) > info.width() || y.saturating_add(size.height) > info.height() {
+        if !x.checked_add(size.width).is_some_and(|end| end <= info.width())
+            || !y.checked_add(size.height).is_some_and(|end| end <= info.height()) {
             return Err(ErrorKind::ImageUpdateOutOfBounds);
         }
 
@@ -285,8 +310,8 @@ impl<T> ImageStore<T> {
     ) -> Result<(), ErrorKind> {
         if let Some(old) = self.0.get_mut(id.0) {
             let new = renderer.alloc_image(info)?;
-            old.0 = info;
-            old.1 = new;
+            let old = std::mem::replace(old, (info, new));
+            renderer.delete_image(old.1, id);
             Ok(())
         } else {
             Err(ErrorKind::ImageIdNotFound)
@@ -310,6 +335,7 @@ impl<T> ImageStore<T> {
         y: usize,
     ) -> Result<(), ErrorKind> {
         if let Some(image) = self.0.get_mut(id.0) {
+            data.check_update(&image.0, x, y)?;
             renderer.update_image(&mut image.1, data, x, y)?;
             Ok(())
         } else {

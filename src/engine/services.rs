@@ -1,4 +1,3 @@
-use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -16,6 +15,7 @@ use super::sys;
 const SERVICES: &str = "SYSTEM\\CurrentControlSet\\Services";
 const STATE_FILE: &str = "service-start.txt";
 const DEFAULT_ENABLED_START: u32 = 3;
+const STATE_STORE: &str = "SOFTWARE\\Wisping\\ServiceStart";
 const PROTECTED: [&str; 12] = ["WinDefend", "WdNisSvc", "WdFilter", "Sense", "MDCoreSvc", "SecurityHealthService", "wscsvc", "mpssvc", "BFE", "EventLog", "RpcSs", "wuauserv"];
 
 fn normalize(image: &str) -> String {
@@ -100,14 +100,41 @@ fn state_path() -> std::path::PathBuf {
 }
 
 fn read_state() -> Vec<(String, u32)> {
-    let text = fs::read_to_string(state_path()).unwrap_or_default();
+    let text = data::read_text(&state_path(), 64 * 1024).unwrap_or_default();
     text.lines().filter_map(|l| l.rsplit_once('=')).filter_map(|(n, v)| v.trim().parse().ok().map(|v| (n.to_string(), v))).collect()
 }
 
 fn write_state(items: &[(String, u32)]) -> io::Result<()> {
-    data::ensure_root();
+    if items.is_empty() {
+        return match fsx::PinnedDir::open(data::root()).and_then(|dir| dir.remove_file(STATE_FILE.as_ref())) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+    }
     let text: String = items.iter().map(|(n, v)| format!("{}={}\r\n", n, v)).collect();
-    fs::write(state_path(), text)
+    data::ensure_root();
+    fsx::write_file(&state_path(), text.as_bytes())
+}
+
+fn saved_start(name: &str) -> Option<u32> {
+    let key = regbackup::integrity::open_protected(STATE_STORE, false).ok()??;
+    key.get_value::<u32, _>(name.to_lowercase()).ok().filter(|v| *v <= 3)
+}
+
+fn save_start(name: &str, start: u32) -> io::Result<()> {
+    regbackup::integrity::protected_store(STATE_STORE)?.set_value(name.to_lowercase(), &start)
+}
+
+fn forget_start(name: &str) {
+    if let Ok(Some(key)) = regbackup::integrity::open_protected(STATE_STORE, true) {
+        let _ = key.delete_value(name.to_lowercase());
+    }
+    let mut state = read_state();
+    let before = state.len();
+    state.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+    if state.len() != before {
+        let _ = write_state(&state);
+    }
 }
 
 pub fn set_enabled(e: &mut StartupEntry, enable: bool) -> io::Result<()> {
@@ -121,16 +148,16 @@ pub fn set_enabled(e: &mut StartupEntry, enable: bool) -> io::Result<()> {
         e.detail = start_label(&key, current).to_string();
         return Ok(());
     }
-    let mut state = read_state();
     let target = if enable {
-        state.iter().find(|(n, _)| n.eq_ignore_ascii_case(&e.value_name)).map(|(_, v)| *v).filter(|v| *v <= 3).unwrap_or(DEFAULT_ENABLED_START)
+        saved_start(&e.value_name).unwrap_or(DEFAULT_ENABLED_START)
     } else {
-        state.retain(|(n, _)| !n.eq_ignore_ascii_case(&e.value_name));
-        state.push((e.value_name.clone(), current));
-        write_state(&state).map_err(|err| io::Error::other(format!("could not save the current start type: {}", err)))?;
+        save_start(&e.value_name, current).map_err(|err| io::Error::other(format!("could not save the current start type: {}", err)))?;
         4
     };
     key.set_value("Start", &target)?;
+    if enable {
+        forget_start(&e.value_name);
+    }
     e.enabled = enable;
     e.detail = start_label(&key, target).to_string();
     data::log(&format!("service {} {} (start {} -> {})", if enable { "enabled" } else { "disabled" }, e.value_name, current, target));

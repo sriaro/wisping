@@ -29,6 +29,62 @@ impl Log {
     }
 }
 
+struct Undo(Option<Box<dyn FnOnce()>>);
+
+impl Undo {
+    fn new(f: impl FnOnce() + 'static) -> Self {
+        Undo(Some(Box::new(f)))
+    }
+}
+
+impl Drop for Undo {
+    fn drop(&mut self) {
+        if let Some(f) = self.0.take() {
+            f();
+        }
+    }
+}
+
+struct DataGuard {
+    target: PathBuf,
+    files: Vec<(PathBuf, Option<Vec<u8>>)>,
+    flags: [bool; 5],
+    lang: u8,
+}
+
+impl DataGuard {
+    fn capture(root: &Path, target: PathBuf) -> Self {
+        use crate::engine::settings;
+        let files = ["settings.txt", "state.txt", "cleaner.log", "history.txt"].iter().map(|n| (root.join(n), fs::read(root.join(n)).ok())).collect();
+        let flags = [settings::log_on(), settings::remember_on(), settings::history_on(), settings::restore_point_on(), settings::low_disk_on()];
+        DataGuard { target, files, flags, lang: settings::lang_choice() }
+    }
+}
+
+impl Drop for DataGuard {
+    fn drop(&mut self) {
+        use crate::engine::settings;
+        let _ = data::reset_location();
+        settings::set_log(self.flags[0]);
+        settings::set_remember(self.flags[1]);
+        settings::set_history(self.flags[2]);
+        settings::set_restore_point(self.flags[3]);
+        settings::set_low_disk(self.flags[4]);
+        settings::set_lang(self.lang);
+        for (path, bytes) in &self.files {
+            match bytes {
+                Some(b) => {
+                    let _ = crate::engine::fsx::write_file(path, b);
+                }
+                None => {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+        wipe(&self.target);
+    }
+}
+
 fn set_times(path: &Path, when: SystemTime) {
     let file = OpenOptions::new().write(true).access_mode(0x100).share_mode(7).custom_flags(0x0200_0000).open(path);
     if let Ok(f) = file {
@@ -72,6 +128,10 @@ fn wipe(dir: &Path) {
 }
 
 pub fn run(out_file: &str) -> bool {
+    let _test_key = Undo::new(|| {
+        registry::set_allow_test_key(false);
+        let _ = hkcu().delete_subkey_all(registry::TEST_KEY);
+    });
     let mut log = Log { text: String::new(), ok: true };
     paths(&mut log);
     files(&mut log);
@@ -100,7 +160,7 @@ fn paths(log: &mut Log) {
     log.check("first_path quoted", registry::first_path("\"C:\\Program Files\\X\\a.exe\" /s").as_deref() == Some("C:\\Program Files\\X\\a.exe"));
     log.check("first_path unquoted with space", registry::first_path("C:\\Program Files\\X Y\\a.exe /silent").as_deref() == Some("C:\\Program Files\\X Y\\a.exe"));
     log.check("first_path keeps dotted folders", registry::first_path("C:\\Tools\\app.exe.d\\run.exe /x").as_deref() == Some("C:\\Tools\\app.exe.d\\run.exe"));
-    let odd = unique("pc-selftest-odd-");
+    let odd = unique("wisping-selftest-odd-");
     let odd_dir = odd.join("X.exe Files");
     let odd_file = odd_dir.join("app.exe");
     let made = fs::create_dir_all(&odd_dir).and_then(|_| fs::write(&odd_file, b"x")).is_ok();
@@ -115,13 +175,13 @@ fn paths(log: &mut Log) {
     log.check("missing unrooted is unknown", !registry::missing("rundll32.exe"));
     let windir = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     log.check("missing existing file", !registry::missing(&format!("{}\\System32\\cmd.exe", windir)));
-    log.check("missing gone file", registry::missing("C:\\NoSuchFolder-pc-test\\x.exe"));
+    log.check("missing gone file", registry::missing("C:\\NoSuchFolder-wisping-test\\x.exe"));
     log.check("missing absent drive is unknown", !registry::missing("Q:\\x.exe") || Path::new("Q:\\").is_dir());
     log.check("missing UNC is unknown", !registry::missing("\\\\server\\share\\x.exe"));
 }
 
 fn files(log: &mut Log) {
-    let boxdir = unique("pc-selftest-");
+    let boxdir = unique("wisping-selftest-");
     let work = boxdir.join("work");
     let old_a = work.join("old.txt");
     let old_b = work.join("sub").join("deep").join("old2.txt");
@@ -244,7 +304,7 @@ fn files(log: &mut Log) {
     cleaner::scan(&mut own);
     log.check("own data folder is refused", own.count == 0);
     log.check("own data is protected by path", data::is_own(&data::backup_root().join("x").join("1.reg")));
-    log.check("exe folder is protected", data::is_own(&data::exe_dir().join("Wisp.exe")));
+    log.check("exe folder is protected", data::is_own(&data::exe_dir().join("Wisping.exe")));
     log.check("other temp is not protected", !data::is_own(&old_a));
 
     let mut drive = target_for(vec![Source::new("C:\\", "*", true, 0)]);
@@ -264,7 +324,7 @@ fn files(log: &mut Log) {
 }
 
 fn age_and_value_tests(log: &mut Log) {
-    let boxdir = unique("pc-selftest-age-");
+    let boxdir = unique("wisping-selftest-age-");
     fs::create_dir_all(&boxdir).unwrap();
     let new_file = boxdir.join("new.txt");
     let old_file = boxdir.join("old.txt");
@@ -354,8 +414,16 @@ fn hkcu() -> RegKey {
 
 fn registry_tests(log: &mut Log) {
     let test_key = registry::TEST_KEY;
-    let backup = unique("pc-selftest-backup-");
+    let backup = unique("wisping-selftest-backup-");
     fs::create_dir_all(&backup).unwrap();
+    let _undo = Undo::new({
+        let backup = backup.clone();
+        move || {
+            let _ = hkcu().delete_subkey_all(format!("{}Guard", test_key));
+            let _ = hkcu().delete_subkey_all(test_key);
+            wipe(&backup);
+        }
+    });
     let (child, _) = hkcu().create_subkey(format!("{}\\Child", test_key)).unwrap();
     child.set_value("A", &"x\"y\\z").unwrap();
     let (k, _) = hkcu().create_subkey(test_key).unwrap();
@@ -422,11 +490,21 @@ fn registry_tests(log: &mut Log) {
     log.check("backup content matches", restored);
 
     let mui_path = "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache";
-    let gone = format!("{}.exe", unique("pc-mui-").display());
-    let there = format!("{}.exe", unique("pc-mui-").display());
+    let gone = format!("{}.exe", unique("wisping-mui-").display());
+    let there = format!("{}.exe", unique("wisping-mui-").display());
     fs::write(&there, b"x").unwrap();
     let gone_name = format!("{}.FriendlyAppName", gone);
     let there_name = format!("{}.FriendlyAppName", there);
+    let _undo_mui = Undo::new({
+        let (gone_name, there_name, there) = (gone_name.clone(), there_name.clone(), there.clone());
+        move || {
+            if let Ok(w) = hkcu().open_subkey_with_flags(mui_path, KEY_WRITE) {
+                let _ = w.delete_value(&gone_name);
+                let _ = w.delete_value(&there_name);
+            }
+            let _ = fs::remove_file(&there);
+        }
+    });
     let (mui, _) = hkcu().create_subkey(mui_path).unwrap();
     mui.set_value(&gone_name, &"Gone").unwrap();
     mui.set_value(&there_name, &"There").unwrap();
@@ -451,13 +529,6 @@ fn registry_tests(log: &mut Log) {
     log.check("an entry that became valid is not removed", stale.is_some() && stale_fixed == 0 && stale_errors.len() == 1 && mui.get_raw_value(&there_name).is_ok());
     drop(mui);
 
-    if let Ok(w) = hkcu().open_subkey_with_flags(mui_path, KEY_WRITE) {
-        let _ = w.delete_value(&gone_name);
-        let _ = w.delete_value(&there_name);
-    }
-    let _ = fs::remove_file(&there);
-    let _ = hkcu().delete_subkey_all(test_key);
-    wipe(&backup);
 }
 
 fn startup_ext_tests(log: &mut Log) {
@@ -497,14 +568,14 @@ fn startup_ext_tests(log: &mut Log) {
     registry::set_allow_test_key(true);
     let base = format!("{}\\CtxTest\\shell\\Verb", registry::TEST_KEY);
     let (k, _) = hkcu().create_subkey(format!("{}\\command", base)).unwrap();
-    k.set_value("", &"\"C:\\NoSuchFolder-pc-test\\x.exe\" \"%1\"").unwrap();
+    k.set_value("", &"\"C:\\NoSuchFolder-wisping-test\\x.exe\" \"%1\"").unwrap();
     let mut e = StartupEntry { kind: StartupKind::Context, hive: Hive::User, key_path: base.clone(), name: "Verb".to_string(), enabled: true, ..Default::default() };
     let verb = || hkcu().open_subkey(&base);
     log.check("context verb disabled", startup::set_enabled(&mut e, false).is_ok() && verb().map(|k| k.get_raw_value("LegacyDisable").is_ok()).unwrap_or(false));
     log.check("context verb enabled again", startup::set_enabled(&mut e, true).is_ok() && verb().map(|k| k.get_raw_value("LegacyDisable").is_err()).unwrap_or(false));
     let mut outside = StartupEntry { kind: StartupKind::Context, hive: Hive::User, key_path: "Software\\Classes\\Directory\\shell".to_string(), ..Default::default() };
     log.check("context refuses keys outside shell verbs", startup::set_enabled(&mut outside, false).is_err() && startup::delete(&outside, Path::new(".")).is_err());
-    let backup = unique("pc-selftest-ctx-");
+    let backup = unique("wisping-selftest-ctx-");
     fs::create_dir_all(&backup).unwrap();
     let removed = startup::delete(&e, &backup).is_ok();
     let files = fs::read_dir(&backup).map(|rd| rd.flatten().count()).unwrap_or(0);
@@ -521,11 +592,23 @@ fn startup_ext_tests(log: &mut Log) {
 
 fn startup_tests(log: &mut Log) {
     let run_key = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-    let backup = unique("pc-selftest-startup-");
+    let backup = unique("wisping-selftest-startup-");
     fs::create_dir_all(&backup).unwrap();
-    let name = "WispSelfTest";
+    let name = "WispingSelfTest";
+    let _undo = Undo::new({
+        let backup = backup.clone();
+        move || {
+            if let Ok(w) = hkcu().open_subkey_with_flags(run_key, KEY_WRITE) {
+                let _ = w.delete_value(name);
+            }
+            if let Ok(w) = hkcu().open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run", KEY_WRITE) {
+                let _ = w.delete_value(name);
+            }
+            wipe(&backup);
+        }
+    });
     let (k, _) = hkcu().create_subkey(run_key).unwrap();
-    k.set_value(name, &"\"C:\\NoSuchFolder-pc-test\\x.exe\" --go").unwrap();
+    k.set_value(name, &"\"C:\\NoSuchFolder-wisping-test\\x.exe\" --go").unwrap();
     let find = || startup::list().into_iter().find(|x| x.name == name);
     let entry = find();
     log.check("startup entry listed and missing", entry.as_ref().map(|e| e.enabled && e.missing).unwrap_or(false));
@@ -539,13 +622,6 @@ fn startup_tests(log: &mut Log) {
         let count = fs::read_dir(&backup).map(|rd| rd.flatten().count()).unwrap_or(0);
         log.check("startup deleted with backup", find().is_none() && count == 1);
     }
-    if let Ok(w) = hkcu().open_subkey_with_flags(run_key, KEY_WRITE) {
-        let _ = w.delete_value(name);
-    }
-    if let Ok(w) = hkcu().open_subkey_with_flags("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run", KEY_WRITE) {
-        let _ = w.delete_value(name);
-    }
-    wipe(&backup);
 }
 
 fn regscan_tests(log: &mut Log) {
@@ -575,10 +651,10 @@ fn diskmap_tests(log: &mut Log) {
     use crate::engine::diskmap::{self, dups, treemap, Kind};
     use std::sync::atomic::AtomicBool;
 
-    let root = unique("pc-selftest-disk-");
+    let root = unique("wisping-selftest-disk-");
     let a = root.join("a");
     let b = root.join("b").join("deep");
-    let other = unique("pc-selftest-disk-target-");
+    let other = unique("wisping-selftest-disk-target-");
     fs::create_dir_all(&a).unwrap();
     fs::create_dir_all(&b).unwrap();
     fs::create_dir_all(&other).unwrap();
@@ -649,7 +725,7 @@ fn engine_ext_tests(log: &mut Log) {
     log.check("mask kinds", Mask::new("*") == Mask::Any && matches!(Mask::new("*.*"), Mask::General(_)) && matches!(Mask::new("cookies.sqlite*"), Mask::Prefix(_)));
 
     log.check("protected: bare windows exe outside system32", fsx::is_protected("explorer.exe") && fsx::is_protected("powershell.exe"));
-    log.check("not protected: unknown bare exe", !fsx::is_protected("pc-no-such-tool.exe"));
+    log.check("not protected: unknown bare exe", !fsx::is_protected("wisping-no-such-tool.exe"));
     log.check("direct child", fsx::direct_child("a\\b\\c", "a\\b\\") && !fsx::direct_child("a\\b\\c\\d", "a\\b\\") && !fsx::direct_child("a\\b\\", "a\\b\\"));
     let reg = sys::system_tool("reg.exe");
     log.check(
@@ -670,11 +746,11 @@ fn engine_ext_tests(log: &mut Log) {
             && cpu::shape(6, &[], 0) == cpu::Topology { logical: 6, cores: 6, fast_cores: 6, hybrid: false, smt: false, l3_groups: 1 },
     );
     log.check("parallel map keeps order and filters", sys::par_map(&items, |x| (x % 3 != 0).then_some(x * 2)) == items.iter().filter(|x| *x % 3 != 0).map(|x| x * 2).collect::<Vec<_>>());
-    log.check("publisher skips network paths", fileinfo::publisher("\\\\pc-no-such-server\\share\\x.exe").is_empty());
+    log.check("publisher skips network paths", fileinfo::publisher("\\\\wisping-no-such-server\\share\\x.exe").is_empty());
     let cmd = format!("{}\\System32\\cmd.exe", fsx::windir());
     log.check("publisher is read and cached", !fileinfo::publisher(&cmd).is_empty() && fileinfo::publisher(&cmd) == fileinfo::publisher(&cmd.to_uppercase()));
 
-    let boxdir = unique("pc-selftest-fence-");
+    let boxdir = unique("wisping-selftest-fence-");
     let root = boxdir.join("root");
     let outside = boxdir.join("outside");
     let sub = root.join("sub");
@@ -714,7 +790,7 @@ fn engine_ext_tests(log: &mut Log) {
     }
     wipe(&boxdir);
 
-    let tree = unique("pc-selftest-tree-");
+    let tree = unique("wisping-selftest-tree-");
     let (mut bytes, mut count) = (0u64, 0u64);
     for a in 0..6 {
         for b in 0..5 {
@@ -745,7 +821,7 @@ fn engine_ext_tests(log: &mut Log) {
     log.check("temp is allowed for broad masks", cleaner::is_safe(&std::env::temp_dir(), "*"));
     log.check("double star counts as broad", !cleaner::is_safe(&profile, "*.*") && cleaner::is_safe(&profile, "*.log"));
 
-    let steam = unique("pc-selftest-steam-");
+    let steam = unique("wisping-selftest-steam-");
     fs::create_dir_all(&steam).unwrap();
     let steam_text = steam.to_string_lossy().into_owned();
     let without = cleaner::steam_ok(&steam_text);
@@ -753,7 +829,7 @@ fn engine_ext_tests(log: &mut Log) {
     log.check("steam folder needs steam.exe and is never the windows folder", !without && cleaner::steam_ok(&steam_text) && !cleaner::steam_ok(fsx::windir()));
     wipe(&steam);
 
-    let adm = unique("pc-selftest-admin-");
+    let adm = unique("wisping-selftest-admin-");
     fs::create_dir_all(&adm).unwrap();
     fs::write(adm.join("x.dmp"), b"1").unwrap();
     let mut at = CleanTarget::custom("crash");
@@ -772,7 +848,7 @@ fn engine_ext_tests(log: &mut Log) {
     log.check("string with data after a null is kept as hex", regbackup::value_line("V", &REG_SZ, &[97, 0, 0, 0, 98, 0, 0, 0]).is_ok_and(|l| l == "\"V\"=hex(1):61,00,00,00,62,00,00,00"));
     log.check("expand string keeps its exact bytes", regbackup::value_line("V", &REG_EXPAND_SZ, &wide("%x%", false)).is_ok_and(|l| l == "\"V\"=hex(2):25,00,78,00,25,00"));
     log.check("binary values are still refused", regbackup::value_line("V", &REG_BINARY, &[1]).is_err());
-    let bad_dir = unique("pc-selftest-badname-");
+    let bad_dir = unique("wisping-selftest-badname-");
     fs::create_dir_all(&bad_dir).unwrap();
     log.check(
         "backups refuse names with control characters",
@@ -786,10 +862,10 @@ fn engine_ext_tests(log: &mut Log) {
 
     log.check(
         "first path keeps network paths textual",
-        registry::first_path("\\\\pc-no-such-server\\share\\tool.exe /x").as_deref() == Some("\\\\pc-no-such-server\\share\\tool.exe") && registry::first_path("\\\\pc-no-such-server\\share\\tool").is_none(),
+        registry::first_path("\\\\wisping-no-such-server\\share\\tool.exe /x").as_deref() == Some("\\\\wisping-no-such-server\\share\\tool.exe") && registry::first_path("\\\\wisping-no-such-server\\share\\tool").is_none(),
     );
-    let keep = RegIssue::new(Hive::User, "apppath", "Software\\pc-selftest\\App Paths\\x.exe", None, "");
-    let mut gone = RegIssue::new(Hive::User, "muicache", "Software\\pc-selftest\\Mui", Some("C:\\pc-none\\x.exe.FriendlyAppName"), "");
+    let keep = RegIssue::new(Hive::User, "apppath", "Software\\wisping-selftest\\App Paths\\x.exe", None, "");
+    let mut gone = RegIssue::new(Hive::User, "muicache", "Software\\wisping-selftest\\Mui", Some("C:\\wisping-none\\x.exe.FriendlyAppName"), "");
     gone.selected = true;
     let merged = registry::rescan(&[gone.clone(), keep.clone()], std::slice::from_ref(&gone));
     let order = ["shareddll", "apppath", "uninstall", "muicache", "com", "extension", "openwith"];
@@ -806,7 +882,7 @@ fn policy_tests(log: &mut Log) {
     registry::set_allow_test_key(true);
     let policy = format!("{}\\PolicyTest\\Policy", registry::TEST_KEY);
     let user = format!("{}\\PolicyTest\\User", registry::TEST_KEY);
-    let backup = unique("pc-selftest-policy-");
+    let backup = unique("wisping-selftest-policy-");
     fs::create_dir_all(&backup).unwrap();
     let dir = backup.clone();
     let make_dir = move || -> std::io::Result<PathBuf> { Ok(dir.clone()) };
@@ -860,23 +936,6 @@ fn policy_tests(log: &mut Log) {
             && tools::set_policy(Hive::Machine, "SOFTWARE\\Policies\\Microsoft\\Windows\\DataCollection", None, "AllowTelemetry", 3, true, &make_dir).is_err()
             && tools::set_policy(Hive::Machine, "SOFTWARE\\Policies\\Microsoft\\Windows\\DataCollection", Some(run), "AllowTelemetry", 0, true, &make_dir).is_err(),
     );
-    let tray = format!("{}{}Tray", registry::TEST_KEY, "\\");
-    let needle: &[&str] = &["\\nvidia corporation\\", "\\display.nvcontainer\\"];
-    for (id, exe) in [("1001", "{{AAAA}}\\NVIDIA Corporation\\App\\a.exe"), ("1002", "{{AAAA}}\\NVIDIA Corporation\\App\\b.exe"), ("1004", "{{BBBB}}\\DriverStore\\nv.inf\\Display.NvContainer\\d.exe"), ("1003", "{{AAAA}}\\Other Corp\\c.exe")] {
-        let (k, _) = hkcu().create_subkey(format!("{}{}{}", tray, "\\", id)).unwrap();
-        k.set_value("ExecutablePath", &exe).unwrap();
-    }
-    hkcu().open_subkey_with_flags(format!("{}{}1002", tray, "\\"), winreg::enums::KEY_WRITE).unwrap().set_value("IsPromoted", &1u32).unwrap();
-    let before = fs::read_dir(&backup).map(|rd| rd.flatten().count()).unwrap_or(0);
-    let hid = crate::engine::trayicons::set_hidden(&tray, needle, true, &make_dir);
-    let val = |id: &str| hkcu().open_subkey(format!("{}{}{}", tray, "\\", id)).ok().and_then(|k| k.get_value::<u32, _>("IsPromoted").ok());
-    log.check("tray icons hidden only for the matching programs", hid.is_ok() && val("1001") == Some(0) && val("1002") == Some(0) && val("1004") == Some(0) && val("1003").is_none() && crate::engine::trayicons::is_hidden(&tray, needle) && crate::engine::trayicons::count(&tray, needle) == 3);
-    log.check("tray icon change backs up an existing value", fs::read_dir(&backup).map(|rd| rd.flatten().count()).unwrap_or(0) == before + 1);
-    let shown = crate::engine::trayicons::set_hidden(&tray, needle, false, &make_dir);
-    log.check("tray icons shown again by removing the value", shown.is_ok() && val("1001").is_none() && val("1002").is_none() && !crate::engine::trayicons::is_hidden(&tray, needle));
-    log.check("tray icons refuse other keys and patterns", crate::engine::trayicons::set_hidden("Software\\Microsoft\\Windows\\CurrentVersion\\Run", needle, true, &make_dir).is_err() && crate::engine::trayicons::set_hidden(&tray, &["\\other corp\\"], true, &make_dir).is_err() && val("1003").is_none());
-    log.check("tray icons report a missing icon", crate::engine::trayicons::set_hidden(&tray, &["\\nvidia corporation\\"], true, &|| Ok(PathBuf::new())).is_ok() && crate::engine::trayicons::set_hidden(&format!("{}{}None", registry::TEST_KEY, "\\"), needle, true, &make_dir).is_err());
-
     log.check("policy refuses real user keys", tools::set_policy(Hive::User, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", Some("Software\\Microsoft\\Windows\\CurrentVersion\\Run"), "x", 1, true, &make_dir).is_err());
 
     registry::set_allow_test_key(false);
@@ -968,7 +1027,7 @@ fn tools_tests(log: &mut Log) {
     let base = format!("{}\\ToolsTest", registry::TEST_KEY);
     let (k, _) = hkcu().create_subkey(format!("{}\\child", base)).unwrap();
     k.set_value("v", &1u32).unwrap();
-    let backup = unique("pc-selftest-tools-");
+    let backup = unique("wisping-selftest-tools-");
     fs::create_dir_all(&backup).unwrap();
     let removed = tools::delete_tree(&base, &backup);
     let files = fs::read_dir(&backup).map(|rd| rd.flatten().count()).unwrap_or(0);
@@ -986,7 +1045,7 @@ fn tools_tests(log: &mut Log) {
     log.check("tool flags write off", tools::write_flags(&pairs, false).is_ok() && !tools::read_flags(&pairs) && vk.get_value::<u32, _>("FlagA").ok() == Some(0));
     log.check("tool flags write on", tools::write_flags(&pairs, true).is_ok() && tools::read_flags(&pairs));
     log.check("tool flags refuse other values", tools::write_flags(&[("Software\\Microsoft\\Windows\\CurrentVersion\\Run", "x")], false).is_err());
-    log.check("tool flags default to on when missing", tools::read_flags(&[("Software\\WispSelfTest\\Nope", "x")]));
+    log.check("tool flags default to on when missing", tools::read_flags(&[("Software\\WispingSelfTest\\Nope", "x")]));
 
     registry::set_allow_test_key(false);
     log.check("tool refuses test keys when not testing", tools::delete_tree(&base, &backup).is_err());
@@ -1004,7 +1063,7 @@ fn data_tests(log: &mut Log) {
     log.check("state parse rejects garbage", settings::parse_state("hello").is_none() && settings::parse_state("page=a\r\nwidth=1\r\nheight=2").is_none());
     log.check(
         "data root is never inside a cleaned temp folder",
-        data::cleaned_root(&std::env::temp_dir().join("Wisp-unzipped")) && data::cleaned_root(&std::env::temp_dir()) && !data::cleaned_root(Path::new("C:\\Tools\\Wisp")),
+        data::cleaned_root(&std::env::temp_dir().join("Wisping-unzipped")) && data::cleaned_root(&std::env::temp_dir()) && !data::cleaned_root(Path::new("C:\\Tools\\Wisping")),
     );
     log.check("backup delete refuses path-like ids", backups::delete("..\\x").is_err() && backups::delete("../x").is_err() && backups::delete("").is_err());
     log.check("backup restore refuses path-like ids", backups::restore("..\\x").is_err() && backups::restore("../x").is_err() && backups::restore("").is_err() && backups::restore("C:\\Windows").is_err());
@@ -1019,12 +1078,11 @@ fn data_tests(log: &mut Log) {
         log.check("data location tests skipped because a custom folder is set", true);
         return;
     }
-    let flags = (settings::log_on(), settings::remember_on());
-    let history_flag = settings::history_on();
-    let target = unique("pc-selftest-data-");
+    let target = unique("wisping-selftest-data-");
     let made = fs::create_dir_all(&target).is_ok();
     let old_root = data::root().to_path_buf();
-    log.check("data root defaults next to the exe or to the local fallback", old_root.ends_with("data") || old_root.ends_with("Wisp"));
+    let _restore = DataGuard::capture(&old_root, target.clone());
+    log.check("data root defaults next to the exe or to the local fallback", old_root.ends_with("data") || old_root.ends_with("Wisping"));
     log.check("move refuses a relative path", data::set_location(Path::new("relative")).is_err());
     log.check("move refuses a folder inside the current data folder", data::set_location(&old_root.join("inner")).is_err());
     let moved = made && data::set_location(&target).is_ok();
@@ -1049,8 +1107,11 @@ fn data_tests(log: &mut Log) {
         if let Ok(dir) = dir {
             let key = registry::TEST_KEY.to_string();
             registry::set_allow_test_key(true);
-            let reg = format!("Windows Registry Editor Version 5.00\r\n\r\n[HKEY_CURRENT_USER\\{}]\r\n\"v\"=\"restored\"\r\n", key);
-            let wrote = fs::write(dir.join("a.reg"), reg).is_ok();
+            let wrote = hkcu().create_subkey(&key).and_then(|(source, _)| {
+                source.set_value("v", &"restored")?;
+                crate::engine::regbackup::export_value(Hive::User, &key, "v", &dir)
+            }).is_ok();
+            let _ = hkcu().delete_subkey_all(&key);
             let listed = backups::list();
             log.check("backup list shows the new backup", wrote && listed.iter().any(|b| Some(b.id.as_str()) == dir.file_name().and_then(|n| n.to_str()) && b.files == 1 && b.keys.first().is_some_and(|k| k.starts_with("HKCU"))));
             let id = dir.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
@@ -1095,16 +1156,12 @@ fn data_tests(log: &mut Log) {
             wipe(&old_root.join("backup").join(id));
         }
     }
-    settings::set_history(history_flag);
-    settings::set_log(flags.0);
-    settings::set_remember(flags.1);
-    wipe(&target);
 }
 
 fn backup_check_tests(log: &mut Log) {
     use crate::engine::backups;
 
-    let root = unique("pc-selftest-backups-");
+    let root = unique("wisping-selftest-backups-");
     let good_dir = root.join("20260101-120000");
     fs::create_dir_all(&good_dir).unwrap();
     let utf16 = |text: &str| -> Vec<u8> { [0xFFu8, 0xFE].into_iter().chain(text.encode_utf16().flat_map(|u| u.to_le_bytes())).collect() };
@@ -1120,7 +1177,7 @@ fn backup_check_tests(log: &mut Log) {
     let no_header = write("0002.reg", format!("{}\"App\"=\"x\"\r\n", run_key));
     log.check("backup check needs the registry file header", backups::check_file(&no_header).is_err());
     let other_key = write("0003.reg", format!("{}[HKEY_CURRENT_USER\\Software\\Other]\r\n\"App\"=\"x\"\r\n", header));
-    log.check("backup check accepts only keys Wisp backs up", backups::check_file(&other_key).is_err());
+    log.check("backup check accepts only keys Wisping backs up", backups::check_file(&other_key).is_err());
     let removes = write("0004.reg", format!("{}{}\"App\"=-\r\n", header, run_key));
     let removes_key = write("0005.reg", format!("{}[-HKEY_CURRENT_USER\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run]\r\n", header));
     log.check("backup check refuses delete lines", backups::check_file(&removes).is_err() && backups::check_file(&removes_key).is_err());
@@ -1143,7 +1200,7 @@ fn backup_check_tests(log: &mut Log) {
     let ifeo = write("0015.reg", format!("{}[HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\NVIDIA App.exe]\r\n\"A\"=\"x\"\r\n", header));
     log.check("backup check narrows Classes and Services and drops unused keys", backups::check_file(&classes_root).is_err() && backups::check_file(&classes_child).is_ok() && backups::check_file(&ifeo).is_err());
 
-    let elsewhere = unique("pc-selftest-backups-target-");
+    let elsewhere = unique("wisping-selftest-backups-target-");
     fs::create_dir_all(&elsewhere).unwrap();
     fs::write(elsewhere.join("0001.reg"), utf16(&format!("{}{}", header, run_key))).unwrap();
     let link = root.join("20260101-130000");
@@ -1167,7 +1224,7 @@ fn single_instance_tests(log: &mut Log) {
 
 fn leftover_tests(log: &mut Log) {
     use crate::engine::leftovers::{self, Links};
-    let base = unique("wisp-leftover-");
+    let base = unique("wisping-leftover-");
     let old = SystemTime::now() - Duration::from_secs(400 * 86_400);
     let make = |rel: &str, file: &str, aged: bool| {
         let dir = base.join(rel);

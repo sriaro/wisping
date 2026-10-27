@@ -19,13 +19,17 @@ const DATA_AGE_DAYS: u64 = 90;
 const PROGRAM_AGE_DAYS: u64 = 30;
 const WALK_LIMIT: usize = 200_000;
 
+#[cfg(test)]
+#[path = "leftovers/security_tests.rs"]
+mod security_tests;
+
 const DENY: &[&str] = &[
     "microsoft", "microsoft shared", "windows", "windowsapps", "modifiablewindowsapps", "packages", "temp", "tmp", "programs", "publishers",
     "common files", "internet explorer", "windows defender", "windows defender advanced threat protection", "windows mail", "windows media player",
     "windows nt", "windows photo viewer", "windows portable devices", "windows security", "windowspowershell", "windows sidebar", "windows kits",
     "dotnet", "msbuild", "reference assemblies", "uninstall information", "package cache", "ssh", "systemcertificates", "connecteddevicesplatform",
     "d3dscache", "history", "comms", "crashdumps", "diagnostics", "peerdistrepub", "placeholdertilelogofolder", "pip", "npm", "npm-cache", "nuget",
-    "wisp", "my games", "saved games", "documents", "desktop", "downloads", "nvidia", "nvidia corporation", "intel", "amd",
+    "wisping", "my games", "saved games", "documents", "desktop", "downloads", "nvidia", "nvidia corporation", "intel", "amd",
     "virtualstore", "softwaredistribution", "usoprivate", "usoshared", "application data", "start menu", "templates", "favorites", "windowsholographicdevices",
     "microsoft help", "system volume information", "recovery", "boot", "perflogs", "sentinel", "oracle", "java", "docker", "dockerdesktop",
 ];
@@ -54,15 +58,15 @@ pub struct Leftover {
 static TEST_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub fn set_test_root(dir: Option<PathBuf>) {
-    *TEST_ROOT.lock().unwrap() = dir;
+    *TEST_ROOT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
 }
 
 fn test_root() -> Option<PathBuf> {
-    TEST_ROOT.lock().unwrap().clone()
+    TEST_ROOT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
 }
 
 fn env_dir(name: &str) -> Option<PathBuf> {
-    std::env::var(name).ok().filter(|v| !v.is_empty()).map(PathBuf::from)
+    super::winenv::var(name).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
 fn roots() -> Vec<Root> {
@@ -78,7 +82,7 @@ fn roots() -> Vec<Root> {
         out.extend(env_dir(name).map(|dir| Root { dir, rule: Rule::Program, admin: true }));
     }
     let mut seen = HashSet::new();
-    out.retain(|r| fsx::norm_key(&r.dir).is_some_and(|k| seen.insert(k)));
+    out.retain(|r| fsx::local_drive_path(&r.dir.to_string_lossy()) && fsx::norm_key(&r.dir).is_some_and(|k| seen.insert(k)));
     out
 }
 
@@ -174,7 +178,7 @@ pub fn links() -> Links {
         l.add_path(&p.location);
         l.add_path(&p.command);
     }
-    for e in startup::list() {
+    for e in startup::list_cached() {
         l.add_name(&e.name);
         l.add_name(&e.publisher);
         l.add_path(&e.command);
@@ -208,7 +212,8 @@ fn is_code(name: &str) -> bool {
     [".exe", ".dll", ".sys", ".msi", ".com", ".scr", ".bat", ".cmd", ".ps1", ".lnk", ".jar", ".py"].iter().any(|e| lower.ends_with(e))
 }
 
-fn measure(dir: &Path, stop_at_code: bool) -> Option<Measure> {
+fn measure(dir: &Path, stop_at_code: bool, days: u64) -> Option<Measure> {
+    let cutoff = SystemTime::now().checked_sub(Duration::from_secs(days.saturating_mul(86_400)));
     let mut m = Measure { size: 0, newest: None, has_code: false, has_link: false };
     let mut stack = vec![dir.to_path_buf()];
     let mut seen = 0usize;
@@ -219,12 +224,15 @@ fn measure(dir: &Path, stop_at_code: bool) -> Option<Measure> {
             if seen > WALK_LIMIT {
                 return None;
             }
-            let Ok(meta) = fs::symlink_metadata(e.path()) else { continue };
+            let Ok(meta) = e.metadata() else { continue };
             if fsx::attrs_reparse(std::os::windows::fs::MetadataExt::file_attributes(&meta)) {
                 m.has_link = true;
                 return Some(m);
             }
             let stamp = fsx::newest(&meta);
+            if cutoff.is_some_and(|cutoff| stamp.is_some_and(|stamp| stamp > cutoff)) {
+                return None;
+            }
             m.newest = m.newest.max(stamp);
             if meta.is_dir() {
                 stack.push(e.path());
@@ -262,13 +270,17 @@ fn candidates(root: &Root, links: &Links, own: &[String]) -> Vec<Leftover> {
         if fsx::norm_key(&path).is_some_and(|k| own.iter().any(|o| *o == k || fsx::key_within(o, &k))) {
             continue;
         }
-        let Some(m) = measure(&path, root.rule == Rule::Program) else { continue };
+        let days = match root.rule {
+            Rule::Data => DATA_AGE_DAYS,
+            Rule::Program => PROGRAM_AGE_DAYS,
+        };
+        let Some(m) = measure(&path, root.rule == Rule::Program, days) else { continue };
         if m.has_link {
             continue;
         }
-        let (code_ok, days) = match root.rule {
-            Rule::Data => (true, DATA_AGE_DAYS),
-            Rule::Program => (!m.has_code, PROGRAM_AGE_DAYS),
+        let code_ok = match root.rule {
+            Rule::Data => true,
+            Rule::Program => !m.has_code,
         };
         let stamp = m.newest.or_else(|| fs::symlink_metadata(&path).ok().and_then(|x| fsx::newest(&x)));
         if code_ok && older_than(stamp, days) {
@@ -286,24 +298,36 @@ pub fn scan() -> Vec<Leftover> {
 
 pub fn scan_with(links: &Links) -> Vec<Leftover> {
     let own = own_dirs();
-    let mut out: Vec<Leftover> = roots().iter().flat_map(|r| candidates(r, links, &own)).collect();
+    let user_roots = super::sys::shell_user_is_self();
+    let mut out: Vec<Leftover> = roots().iter().filter(|r| user_roots || r.admin).filter(|r| fsx::PinnedDir::open(&r.dir).is_ok()).flat_map(|r| candidates(r, links, &own)).collect();
     out.sort_by_key(|l| std::cmp::Reverse(l.size));
     out
 }
 
-pub fn allowed(path: &Path) -> bool {
-    let (Some(key), Some(parent)) = (fsx::norm_key(path), path.parent().and_then(fsx::norm_key)) else { return false };
-    let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else { return false };
-    if denied(&name) || key.starts_with("\\\\") || fsx::is_reparse(path) || !path.is_dir() {
-        return false;
+fn pinned_parent(path: &Path) -> Option<fsx::PinnedDir> {
+    let (Some(key), Some(parent)) = (fsx::norm_key(path), path.parent().and_then(fsx::norm_key)) else { return None };
+    let name = path.file_name()?;
+    if denied(&name.to_string_lossy()) || key.starts_with("\\\\") || fsx::is_reparse(path) || !path.is_dir() {
+        return None;
     }
-    roots().iter().any(|r| fsx::norm_key(&r.dir).is_some_and(|k| k == parent))
+    let root = roots().into_iter().find(|r| fsx::norm_key(&r.dir).is_some_and(|k| k == parent))?;
+    if !root.admin && !super::sys::shell_user_is_self() {
+        return None;
+    }
+    let pin = fsx::PinnedDir::open(&root.dir).ok()?;
+    pin.child(name, false).ok()?;
+    Some(pin)
+}
+
+pub fn allowed(path: &Path) -> bool {
+    pinned_parent(path).is_some()
 }
 
 pub fn recycle(path: &Path) -> io::Result<()> {
-    if !allowed(path) {
+    let (Some(parent), Some(name)) = (pinned_parent(path), path.file_name()) else {
         return Err(io::Error::other("refused"));
-    }
+    };
+    let path = parent.path().join(name);
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.extend([0, 0]);
     let mut op = SHFILEOPSTRUCTW {

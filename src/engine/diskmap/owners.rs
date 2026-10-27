@@ -19,11 +19,11 @@ pub struct Owners {
 fn app_roots() -> Vec<String> {
     let mut v = Vec::new();
     for name in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData", "LOCALAPPDATA", "APPDATA"] {
-        if let Ok(p) = std::env::var(name) {
+        if let Some(p) = crate::engine::winenv::var(name) {
             v.push(p.trim_end_matches('\\').to_lowercase());
         }
     }
-    if let Ok(p) = std::env::var("LOCALAPPDATA") {
+    if let Some(p) = crate::engine::winenv::var("LOCALAPPDATA") {
         v.push(format!("{}\\programs", p.trim_end_matches('\\').to_lowercase()));
     }
     v.sort();

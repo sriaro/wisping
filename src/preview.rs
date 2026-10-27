@@ -28,7 +28,6 @@ fn save(ui: &MainWindow, path: &Path) {
 
 fn sample(scanned: bool) -> Core {
     let mut core = app::make_core(false);
-    core.startups.clear();
     let sizes: [(&str, u64, u64, bool); 15] = [
         ("usertemp", 21_200_000_000, 48622, true),
         ("wintemp", 660_700_000, 22, true),
@@ -146,7 +145,7 @@ fn scenes() -> Vec<(String, Step)> {
         })));
         out.push((format!("{}-disk", theme), Box::new(move |ui| {
             base(ui, 5);
-            let root = std::env::var("PC_PREVIEW_ROOT").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let root = std::env::var("WISPING_PREVIEW_ROOT").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from("."));
             crate::pages::disk::preview(ui, root, true);
         })));
         out.push((format!("{}-tools", theme), Box::new(move |ui| {
@@ -232,7 +231,7 @@ pub fn run(dir: &str) {
     let out: PathBuf = PathBuf::from(dir);
     slint::BackendSelector::new()
         .backend_name("winit".into())
-        .renderer_name(std::env::var("WISP_RENDERER").unwrap_or_else(|_| "femtovg".into()).as_str().into())
+        .renderer_name(std::env::var("WISPING_RENDERER").unwrap_or_else(|_| "femtovg".into()).as_str().into())
         .with_winit_window_attributes_hook(|attrs| attrs.with_position(PhysicalPosition::new(-32000, -32000)).with_skip_taskbar(true))
         .select()
         .unwrap();
@@ -241,18 +240,18 @@ pub fn run(dir: &str) {
     app::install_text(&ui);
     crate::pages::install(&app::Ctx::new(ui.as_weak(), std::sync::Arc::new(std::sync::Mutex::new(Core::default()))));
     let dim = |name: &str, default: u32| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
-    ui.window().set_size(PhysicalSize::new(dim("PC_PREVIEW_W", 1620), dim("PC_PREVIEW_H", 1110)));
+    ui.window().set_size(PhysicalSize::new(dim("WISPING_PREVIEW_W", 1620), dim("WISPING_PREVIEW_H", 1110)));
     crate::motion::sync_scale(&ui);
     ui.show().unwrap();
 
-    let only = std::env::var("PC_PREVIEW_ONLY").unwrap_or_default();
+    let only = std::env::var("WISPING_PREVIEW_ONLY").unwrap_or_default();
     let steps = Rc::new(scenes().into_iter().filter(|s| s.0.contains(only.as_str())).collect::<Vec<_>>());
     let index = Rc::new(std::cell::Cell::new(0usize));
     let phase = Rc::new(std::cell::Cell::new(0u8));
     let timer = Rc::new(Timer::default());
     let weak = ui.as_weak();
     let keep = timer.clone();
-    let tick = std::env::var("PC_PREVIEW_TICK").ok().and_then(|v| v.parse().ok()).unwrap_or(450u64);
+    let tick = std::env::var("WISPING_PREVIEW_TICK").ok().and_then(|v| v.parse().ok()).unwrap_or(450u64);
     timer.start(TimerMode::Repeated, Duration::from_millis(tick), move || {
         let Some(ui) = weak.upgrade() else { return };
         let i = index.get();
@@ -320,9 +319,10 @@ pub fn perf(file: &str) {
     use slint::{GraphicsAPI, RenderingState};
     use std::cell::{Cell, RefCell};
     use std::time::Instant;
+    let renderer = std::env::var("WISPING_RENDERER").unwrap_or_else(|_| "femtovg".into());
     slint::BackendSelector::new()
         .backend_name("winit".into())
-        .renderer_name("femtovg".into())
+        .renderer_name(renderer.as_str().into())
         .with_winit_window_attributes_hook(|attrs| attrs.with_position(PhysicalPosition::new(-32000, -32000)).with_skip_taskbar(true))
         .select()
         .unwrap();
@@ -335,13 +335,15 @@ pub fn perf(file: &str) {
     crate::views::push_all(&ui, &core.lock().unwrap());
     ui.global::<AppState>().set_page(3);
     ui.global::<Theme>().set_shown_page(3);
-    ui.window().set_size(PhysicalSize::new(1620, 1110));
+    let dim = |name: &str, default: u32| std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default);
+    ui.window().set_size(PhysicalSize::new(dim("WISPING_PERF_W", 1620), dim("WISPING_PERF_H", 1110)));
     crate::motion::sync_scale(&ui);
     let t0 = Instant::now();
     let frames: Rc<RefCell<Vec<(f64, f64)>>> = Rc::new(RefCell::new(Vec::new()));
     let gl: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
     let begin: Rc<Cell<Option<Instant>>> = Rc::new(Cell::new(None));
-    {
+    let path = file.to_string();
+    let notifier = {
         let frames = frames.clone();
         let gl = gl.clone();
         let begin = begin.clone();
@@ -373,7 +375,10 @@ pub fn perf(file: &str) {
                 }
                 _ => {}
             })
-            .unwrap();
+    };
+    if notifier.is_err() {
+        let _ = fs::write(&path, "frame timing unavailable for this renderer\n");
+        return;
     }
     ui.show().unwrap();
     let pages = [6, 7, 0, 3, 2, 6, 3, 7];
@@ -381,7 +386,6 @@ pub fn perf(file: &str) {
     let marks: Rc<RefCell<Vec<f64>>> = Rc::new(RefCell::new(Vec::new()));
     let timer = Rc::new(Timer::default());
     let keep = timer.clone();
-    let path = file.to_string();
     timer.start(TimerMode::Repeated, Duration::from_millis(1600), move || {
         let i = step.get();
         if i < pages.len() {
@@ -392,7 +396,8 @@ pub fn perf(file: &str) {
         }
         keep.stop();
         let f = frames.borrow();
-        let mut out = format!("gl: {}\nscale: {}\nframes: {}\n", gl.borrow(), ui.window().scale_factor(), f.len());
+        let size = ui.window().size();
+        let mut out = format!("gl: {}\nscale: {}\nsize: {}x{}\nrefresh: {} Hz\nframes: {}\n", gl.borrow(), ui.window().scale_factor(), size.width, size.height, crate::winui::refresh_rate().unwrap_or(0), f.len());
         let mut gaps = Vec::new();
         let mut costs = Vec::new();
         for m in marks.borrow().iter() {

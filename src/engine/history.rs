@@ -1,8 +1,6 @@
-use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 
-use super::{data, settings, sys};
+use super::{data, fsx, settings, sys};
 
 const SHOWN: usize = 200;
 const KEPT: usize = 600;
@@ -26,19 +24,7 @@ pub fn record(kind: &str, a: u64, b: u64, c: u64) {
     let s = sys::now_local();
     let line = format!("{:04}-{:02}-{:02} {:02}:{:02}\t{}\t{}\t{}\t{}\n", s.year, s.month, s.day, s.hour, s.minute, kind, a, b, c);
     data::ensure_root();
-    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path()) {
-        let _ = f.write_all(line.as_bytes());
-    }
-    trim();
-}
-
-fn trim() {
-    let Ok(text) = fs::read_to_string(path()) else { return };
-    let lines: Vec<&str> = text.lines().collect();
-    if lines.len() > KEPT {
-        let kept = lines[lines.len() - KEPT..].join("\n") + "\n";
-        let _ = fs::write(path(), kept);
-    }
+    let _ = fsx::PinnedDir::create(data::root()).and_then(|dir| dir.append_lines("history.txt".as_ref(), &line, KEPT));
 }
 
 pub fn parse(line: &str) -> Option<Entry> {
@@ -55,7 +41,7 @@ pub fn parse(line: &str) -> Option<Entry> {
 }
 
 fn all() -> Vec<Entry> {
-    fs::read_to_string(path()).map(|t| t.lines().filter_map(parse).collect()).unwrap_or_default()
+    data::read_text(&path(), 256 * 1024).map(|t| t.lines().filter_map(parse).collect()).unwrap_or_default()
 }
 
 pub fn list() -> Vec<Entry> {
@@ -70,5 +56,5 @@ pub fn total_freed() -> u64 {
 }
 
 pub fn clear() {
-    let _ = fs::remove_file(path());
+    let _ = fsx::PinnedDir::open(data::root()).and_then(|dir| dir.remove_file("history.txt".as_ref()));
 }

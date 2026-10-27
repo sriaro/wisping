@@ -33,7 +33,7 @@ fn is_guid(text: &str) -> bool {
     text.len() == 38 && text.starts_with('{') && text.ends_with('}')
 }
 
-fn clsid_server(clsid: &str) -> Option<String> {
+pub(super) fn clsid_server(clsid: &str) -> Option<String> {
     let probes = [
         (Hive::Machine, format!("SOFTWARE\\Classes\\CLSID\\{}\\InprocServer32", clsid)),
         (Hive::Machine, format!("SOFTWARE\\Classes\\WOW6432Node\\CLSID\\{}\\InprocServer32", clsid)),
@@ -50,7 +50,7 @@ fn clsid_server(clsid: &str) -> Option<String> {
     None
 }
 
-fn clsid_name(clsid: &str) -> Option<String> {
+pub(super) fn clsid_name(clsid: &str) -> Option<String> {
     for hive in [Hive::Machine, Hive::User] {
         if let Ok(key) = hive.open(&format!("{}\\CLSID\\{}", classes(hive), clsid))
             && let Some(v) = regbackup::read_string(&key, "")
@@ -59,6 +59,17 @@ fn clsid_name(clsid: &str) -> Option<String> {
                 }
     }
     None
+}
+
+fn clsid_registered(clsid: &str) -> bool {
+    let bases = [
+        (Hive::Machine, "SOFTWARE\\Classes\\CLSID"),
+        (Hive::Machine, "SOFTWARE\\Classes\\WOW6432Node\\CLSID"),
+        (Hive::User, "Software\\Classes\\CLSID"),
+        (Hive::Machine, "SOFTWARE\\Classes\\PackagedCom\\ClassIndex"),
+        (Hive::User, "Software\\Classes\\PackagedCom\\ClassIndex"),
+    ];
+    bases.iter().any(|(hive, base)| hive.open(&format!("{}\\{}", base, clsid)).is_ok())
 }
 
 fn blocked_names(hive: Hive) -> Vec<String> {
@@ -81,7 +92,7 @@ pub fn list() -> Vec<StartupEntry> {
             let base = format!("{}\\{}", classes(hive), root);
             if let Ok(handlers) = hive.open(&format!("{}\\shellex\\ContextMenuHandlers", base)) {
                 for name in handlers.enum_keys().flatten() {
-                    let Ok(sub) = handlers.open_subkey_with_flags(&name, KEY_READ | KEY_WOW64_64KEY) else { continue };
+                    let Ok(sub) = registry::target::open_child(&handlers, &name, KEY_READ | KEY_WOW64_64KEY) else { continue };
                     let default = regbackup::read_string(&sub, "").unwrap_or_default();
                     let clsid = if is_guid(default.trim()) {
                         default.trim().to_string()
@@ -98,7 +109,7 @@ pub fn list() -> Vec<StartupEntry> {
                         name: shown,
                         command: program.clone(),
                         enabled: !blocked.contains(&clsid.to_lowercase()),
-                        missing: !program.is_empty() && registry::missing(&program),
+                        missing: if program.is_empty() { !clsid_registered(&clsid) } else { registry::missing(&program) },
                         hive,
                         key_path: format!("{}\\shellex\\ContextMenuHandlers\\{}", base, name),
                         value_name: clsid,
@@ -111,8 +122,8 @@ pub fn list() -> Vec<StartupEntry> {
             }
             if let Ok(verbs) = hive.open(&format!("{}\\shell", base)) {
                 for name in verbs.enum_keys().flatten() {
-                    let Ok(sub) = verbs.open_subkey_with_flags(&name, KEY_READ | KEY_WOW64_64KEY) else { continue };
-                    let command = sub.open_subkey_with_flags("command", KEY_READ | KEY_WOW64_64KEY).ok().and_then(|c| regbackup::read_string(&c, "")).unwrap_or_default();
+                    let Ok(sub) = registry::target::open_child(&verbs, &name, KEY_READ | KEY_WOW64_64KEY) else { continue };
+                    let command = registry::target::open_child(&sub, "command", KEY_READ | KEY_WOW64_64KEY).ok().and_then(|c| regbackup::read_string(&c, "")).unwrap_or_default();
                     let exe = registry::first_path(&command);
                     let shown = ["MUIVerb", ""]
                         .iter()
@@ -171,11 +182,13 @@ pub fn set_blocked(hive: Hive, clsid: &str, on: bool) -> io::Result<()> {
         return Err(io::Error::other("bad handler"));
     }
     if on {
-        let (key, _) = hive.root().create_subkey_with_flags(BLOCKED, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)?;
+        let key = hive.create(BLOCKED)?;
         key.set_value(clsid, &"")
     } else {
-        let Ok(key) = hive.open_write(BLOCKED) else {
-            return if blocked_in(hive, clsid) { Err(io::Error::new(io::ErrorKind::PermissionDenied, "access denied")) } else { Ok(()) };
+        let key = match hive.open_write(BLOCKED) {
+            Ok(key) => key,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
         };
         let names: Vec<String> = key.enum_values().flatten().map(|v| v.0).filter(|n| n.eq_ignore_ascii_case(clsid)).collect();
         for n in names {
@@ -199,7 +212,7 @@ pub fn set_enabled(e: &mut StartupEntry, enable: bool) -> io::Result<()> {
                 return Err(io::Error::new(io::ErrorKind::PermissionDenied, "access denied"));
             }
         } else {
-            set_blocked(Hive::Machine, &e.value_name, true)?;
+            set_blocked(e.hive, &e.value_name, true)?;
         }
     } else {
         let key = e.hive.open_write(&e.key_path)?;
@@ -218,10 +231,9 @@ pub fn set_enabled(e: &mut StartupEntry, enable: bool) -> io::Result<()> {
 
 pub fn delete(e: &StartupEntry, backup_dir: &Path) -> io::Result<()> {
     locate(e.hive, &e.key_path).ok_or_else(|| io::Error::other("bad entry"))?;
-    regbackup::export_key(e.hive, &e.key_path, backup_dir)?;
-    let slash = e.key_path.rfind('\\').ok_or_else(|| io::Error::other("bad entry"))?;
-    let parent = e.hive.open_write(&e.key_path[..slash])?;
-    parent.delete_subkey_all(&e.key_path[slash + 1..])?;
+    let tree = e.hive.tree(&e.key_path)?;
+    regbackup::export_tree(e.hive, &e.key_path, &tree, backup_dir)?;
+    tree.delete()?;
     data::log(&format!("context menu deleted {}", e.key_path));
     Ok(())
 }

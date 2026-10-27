@@ -1,5 +1,5 @@
 import { Theme, T } from "../theme.slint";
-import { Chip, SecondaryButton, IconButton, ListGroup, Toggle, SegTabs } from "../widgets.slint";
+import { Chip, SecondaryButton, IconButton, ListGroup, Toggle, SegTabs, ProgressStrip } from "../widgets.slint";
 import { PageFrame, PageHead, EmptyState } from "common.slint";
 import { Intro, Rise } from "../motion.slint";
 
@@ -23,6 +23,7 @@ export global BackupsState {
     in-out property <int> tab: 0;
     in-out property <string> sub;
     in-out property <string> empty;
+    in-out property <bool> busy: false;
     callback select-tab(int);
     callback switched(string, bool);
     callback act(string);
@@ -89,6 +90,7 @@ component DataRow inherits Rise {
         if root.item.toggle: Toggle {
             fade: root.v;
             on: root.item.on;
+            enabled: !BackupsState.busy;
             y: (parent.height - self.height) / 2;
             toggled(v) => {
                 BackupsState.switched(root.item.id, v);
@@ -98,7 +100,7 @@ component DataRow inherits Rise {
             fade: root.v;
             text: root.item.button;
             height: 32px;
-            enabled: root.item.enabled;
+            enabled: root.item.enabled && !BackupsState.busy;
             y: (parent.height - self.height) / 2;
             clicked => {
                 BackupsState.act(root.item.id);
@@ -108,6 +110,7 @@ component DataRow inherits Rise {
             fade: root.v;
             icon: "trash";
             danger: true;
+            enabled: !BackupsState.busy;
             y: (parent.height - self.height) / 2;
             clicked => {
                 BackupsState.remove(root.item.id);
@@ -145,6 +148,11 @@ export component BackupsPage inherits PageFrame {
                 icon: "archive";
                 title: BackupsState.empty;
                 sub: BackupsState.sub;
+            }
+            ProgressStrip {
+                y: 0px;
+                width: parent.width;
+                active: BackupsState.busy;
             }
         }
     }

@@ -6,13 +6,13 @@ use windows::Win32::System::Memory::{GetProcessHeap, HEAP_FLAGS, HeapCompact};
 use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
+use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, ReleaseDC, VREFRESH};
 use windows::Win32::Graphics::Dwm::{DWMWA_BORDER_COLOR, DWMWA_CLOAK, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::Controls::{TASKDIALOG_COMMON_BUTTON_FLAGS, TD_ERROR_ICON, TaskDialog};
 use windows::Win32::UI::Shell::ShellExecuteW;
-use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetCursorPos, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, SW_SHOWNORMAL, GWL_STYLE, GetWindowLongW, SetWindowLongW, SetWindowPos, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_SYSMENU, SIZE_MINIMIZED, STYLESTRUCT, WM_NCDESTROY, WM_SIZE, WM_STYLECHANGING};
+use windows::Win32::UI::WindowsAndMessaging::{EnumWindows, GetCursorPos, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, SW_SHOWNORMAL, GWL_STYLE, GetWindowLongW, SetWindowLongW, SetWindowPos, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_SYSMENU, SIZE_MINIMIZED, STYLESTRUCT, WM_NCDESTROY, WM_SIZE, WM_STYLECHANGING};
 use windows::core::{BOOL, HSTRING, PCWSTR, w};
 
 unsafe extern "system" fn find_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -21,7 +21,7 @@ unsafe extern "system" fn find_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
     if pid == unsafe { GetCurrentProcessId() } && unsafe { IsWindowVisible(hwnd) }.as_bool() {
         let mut buf = [0u16; 64];
         let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
-        if n > 0 && String::from_utf16_lossy(&buf[..n as usize]) == "Wisp" {
+        if n > 0 && String::from_utf16_lossy(&buf[..n as usize]) == "Wisping" {
             unsafe { *(lparam.0 as *mut isize) = hwnd.0 as isize };
             return BOOL(0);
         }
@@ -102,7 +102,27 @@ thread_local! {
 }
 
 pub fn trim_soon() {
-    TRIM.with(|t| t.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(3000), trim_memory));
+    TRIM.with(|t| t.start(slint::TimerMode::SingleShot, std::time::Duration::from_millis(3000), trim_if_minimized));
+}
+
+fn trim_if_minimized() {
+    let Some(hwnd) = our_window() else { return };
+    if unsafe { IsIconic(hwnd) }.as_bool() {
+        trim_memory();
+    }
+}
+
+pub fn refresh_rate() -> Option<u32> {
+    unsafe {
+        let hwnd = our_window();
+        let hdc = GetDC(hwnd);
+        if hdc.0.is_null() {
+            return None;
+        }
+        let hz = GetDeviceCaps(Some(hdc), VREFRESH);
+        let _ = ReleaseDC(hwnd, hdc);
+        (hz > 0).then_some(hz as u32)
+    }
 }
 
 pub fn trim_memory() {
@@ -188,7 +208,7 @@ pub fn claim_instance(wait_ms: u64) -> bool {
     use windows::Win32::System::Threading::CreateMutexW;
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
     loop {
-        let created = unsafe { CreateMutexW(None, true, w!("Local\\Wisp.SingleInstance")) };
+        let created = unsafe { CreateMutexW(None, true, w!("Local\\Wisping.SingleInstance")) };
         let taken = match created {
             Ok(handle) => {
                 if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
@@ -220,7 +240,7 @@ unsafe extern "system" fn find_other(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let n = unsafe { GetWindowTextW(hwnd, &mut title) };
         let mut class = [0u16; 32];
         let c = unsafe { GetClassNameW(hwnd, &mut class) };
-        if n > 0 && c > 0 && String::from_utf16_lossy(&title[..n as usize]) == "Wisp" && String::from_utf16_lossy(&class[..c as usize]) == "Window Class" {
+        if n > 0 && c > 0 && String::from_utf16_lossy(&title[..n as usize]) == "Wisping" && String::from_utf16_lossy(&class[..c as usize]) == "Window Class" && same_image(pid) {
             unsafe { *(lparam.0 as *mut isize) = hwnd.0 as isize };
             return BOOL(0);
         }
@@ -228,21 +248,46 @@ unsafe extern "system" fn find_other(hwnd: HWND, lparam: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-pub fn activate_existing() {
-    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, SetForegroundWindow, ShowWindow};
+fn same_image(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
+    use windows::core::PWSTR;
+    let Some(own) = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned())) else { return false };
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let ok = unsafe {
+        let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        let ok = QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(process);
+        ok
+    };
+    ok && std::path::Path::new(&String::from_utf16_lossy(&buf[..(len as usize).min(buf.len())])).file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&own))
+}
+
+pub fn activate_existing(wait_ms: u64) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{SW_RESTORE, SetForegroundWindow, ShowWindow};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
     let mut found: isize = 0;
-    unsafe {
-        let _ = EnumWindows(Some(find_other), LPARAM(&mut found as *mut isize as isize));
-    }
-    if found != 0 {
-        let hwnd = HWND(found as *mut c_void);
+    loop {
         unsafe {
-            if IsIconic(hwnd).as_bool() {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
-            }
-            let _ = SetForegroundWindow(hwnd);
+            let _ = EnumWindows(Some(find_other), LPARAM(&mut found as *mut isize as isize));
         }
+        if found != 0 || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    if found == 0 {
+        return false;
+    }
+    let hwnd = HWND(found as *mut c_void);
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let _ = SetForegroundWindow(hwnd);
+    }
+    true
 }
 
 pub fn restart_elevated() -> bool {
@@ -253,7 +298,7 @@ pub fn restart_elevated() -> bool {
 
 pub fn fatal(title: &str, text: &str) {
     unsafe {
-        let _ = TaskDialog(None, None, &HSTRING::from(title), &HSTRING::from("Wisp"), &HSTRING::from(text), TASKDIALOG_COMMON_BUTTON_FLAGS(1), TD_ERROR_ICON, None);
+        let _ = TaskDialog(None, None, &HSTRING::from(title), &HSTRING::from("Wisping"), &HSTRING::from(text), TASKDIALOG_COMMON_BUTTON_FLAGS(1), TD_ERROR_ICON, None);
     }
 }
 

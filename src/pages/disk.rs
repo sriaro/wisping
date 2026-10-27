@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -27,9 +26,11 @@ struct State {
     location: usize,
     tree: Option<Arc<Tree>>,
     owners: Option<Arc<Owners>>,
+    owners_running: bool,
     groups: Arc<Vec<Group>>,
     group_of: HashMap<u32, usize>,
     dups_ready: bool,
+    dups_running: bool,
     largest: Vec<u32>,
     current: u32,
     selected: Option<u32>,
@@ -72,15 +73,15 @@ fn locations() -> Vec<(String, PathBuf)> {
         let wide: Vec<u16> = root.encode_utf16().chain(std::iter::once(0)).collect();
         let kind = unsafe { GetDriveTypeW(windows::core::PCWSTR(wide.as_ptr())) };
         if kind == 2 || kind == 3 {
-            let system = std::env::var("SystemDrive").is_ok_and(|d| d.to_ascii_uppercase().starts_with(letter));
+            let system = crate::engine::winenv::var("SystemDrive").is_some_and(|d| d.to_ascii_uppercase().starts_with(letter));
             let name = if system { i18n::get("disk.loc.system") } else { i18n::fmt("disk.loc.fixed", &[&letter.to_string()]) };
             v.push((name, PathBuf::from(root)));
         }
     }
-    if let Ok(p) = std::env::var("USERPROFILE") {
+    if let Some(p) = crate::engine::winenv::var("USERPROFILE") {
         v.push((i18n::get("disk.loc.user"), PathBuf::from(p)));
     }
-    if let Ok(p) = std::env::var("LOCALAPPDATA") {
+    if let Some(p) = crate::engine::winenv::var("LOCALAPPDATA") {
         v.push((i18n::get("disk.loc.appdata"), PathBuf::from(p)));
     }
     v
@@ -270,6 +271,78 @@ fn row(idx: i32, title: String, sub: String, size: u64, frac: f64, tint: i32, ki
     DiskRow { idx, title: crate::views::ltr(&title).into(), sub: crate::views::ltr(&sub).into(), size: data::format_size(size).into(), frac: frac.clamp(0.0, 1.0) as f32, tint, kind }
 }
 
+fn begin_dups(ui: &MainWindow, s: &mut State) {
+    if s.dups_ready || s.dups_running {
+        return;
+    }
+    let Some(tree) = s.tree.as_ref().cloned() else { return };
+    s.dup_cancel = Arc::new(AtomicBool::new(false));
+    let cancel = s.dup_cancel.clone();
+    let id = s.scan_id;
+    let weak = ui.as_weak();
+    s.dups_running = true;
+    std::thread::spawn(move || {
+        let _reset = crate::app::panic_reset(&weak, move |ui| {
+            with(|s| {
+                if s.scan_id == id {
+                    s.dups_running = false;
+                    push_list(ui, s);
+                }
+            })
+        });
+        let groups = dups::find(&tree, &cancel);
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            crate::winui::trim_soon();
+            with(|s| {
+                if s.scan_id != id {
+                    return;
+                }
+                s.group_of = groups.iter().enumerate().flat_map(|(gi, g)| g.members.iter().map(move |&m| (m, gi))).collect();
+                s.groups = Arc::new(groups);
+                s.dups_ready = true;
+                s.dups_running = false;
+                push_selection(&ui, s);
+                push_list(&ui, s);
+            });
+        });
+    });
+}
+
+fn begin_owners(ui: &MainWindow, s: &mut State) {
+    if s.owners.is_some() || s.owners_running {
+        return;
+    }
+    let Some(tree) = s.tree.as_ref().cloned() else { return };
+    let weak = ui.as_weak();
+    s.owners_running = true;
+    std::thread::spawn(move || {
+        let built = tree.clone();
+        let _reset = crate::app::panic_reset(&weak, move |ui| {
+            with(|s| {
+                if s.tree.as_ref().is_some_and(|t| Arc::ptr_eq(t, &built)) {
+                    s.owners_running = false;
+                    push_list(ui, s);
+                }
+            })
+        });
+        let owners = Arc::new(owners::build(&tree));
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            with(|s| {
+                if !s.tree.as_ref().is_some_and(|t| Arc::ptr_eq(t, &tree)) {
+                    return;
+                }
+                s.owners = Some(owners);
+                s.owners_running = false;
+                push_selection(&ui, s);
+                push_list(&ui, s);
+            });
+        });
+    });
+}
+
 fn push_list(ui: &MainWindow, s: &State) {
     let st = ui.global::<DiskState>();
     let Some(tree) = &s.tree else {
@@ -336,6 +409,9 @@ fn push_list(ui: &MainWindow, s: &State) {
         },
         _ => {
             let Some(owners) = &s.owners else {
+                if s.owners_running {
+                    rows.push(row(-1, i18n::get("disk.grouping"), String::new(), 0, 0.0, 7, 3));
+                }
                 st.set_rows(ModelRc::new(VecModel::from(rows)));
                 st.set_list_back("".into());
                 return;
@@ -439,6 +515,12 @@ fn start_scan(c: &Ctx) {
         s.partial = false;
         s.dup_cancel.store(true, Ordering::Relaxed);
         s.dup_cancel = Arc::new(AtomicBool::new(false));
+        s.dups_running = false;
+        s.tree = None;
+        s.owners = None;
+        s.owners_running = false;
+        s.selected = None;
+        push_all(&ui, s);
         let progress = Arc::new(Progress::default());
         s.progress = Some(progress.clone());
         Some((root, s.scan_id, progress))
@@ -462,59 +544,47 @@ fn start_scan(c: &Ctx) {
     }
     with(|s| s.poll = Some(poll));
     std::thread::spawn(move || {
+        let _reset = crate::app::panic_reset(&weak, move |ui| {
+            with(|s| {
+                if s.scan_id == id {
+                    s.scanning = false;
+                    s.poll = None;
+                    push_all(ui, s);
+                }
+            })
+        });
         let tree = diskmap::scan(&root, &progress);
         let cancelled = progress.cancel.load(Ordering::Relaxed);
-        let owners = (!cancelled).then(|| owners::build(&tree));
         let tree = Arc::new(tree);
         let largest = tree.largest_files(MAX_ROWS);
-        let for_dups = tree.clone();
         let _ = weak.upgrade_in_event_loop(move |ui| {
             crate::winui::trim_soon();
-            let cancel = with(|s| {
+            with(|s| {
                 if s.scan_id != id {
-                    return None;
+                    return;
                 }
                 s.scanning = false;
                 s.poll = None;
                 if !cancelled {
-                    s.tree = Some(tree.clone());
-                    s.owners = owners.map(Arc::new);
+                    s.tree = Some(tree);
+                    s.owners = None;
+                    s.owners_running = false;
                     s.largest = largest;
                     s.groups = Arc::new(Vec::new());
                     s.group_of.clear();
                     s.dups_ready = false;
+                    s.dups_running = false;
                     s.current = 0;
                     s.selected = None;
                     s.dup_open = None;
                     s.owner_open = None;
                     s.partial = !crate::engine::sys::is_admin();
+                    begin_owners(&ui, s);
+                    if s.list_mode == 2 {
+                        begin_dups(&ui, s);
+                    }
                 }
                 push_all(&ui, s);
-                Some(s.dup_cancel.clone())
-            });
-            let Some(cancel) = cancel else { return };
-            if cancelled {
-                return;
-            }
-            let weak2 = ui.as_weak();
-            std::thread::spawn(move || {
-                let groups = dups::find(&for_dups, &cancel);
-                if cancel.load(Ordering::Relaxed) {
-                    return;
-                }
-                let _ = weak2.upgrade_in_event_loop(move |ui| {
-                    crate::winui::trim_soon();
-                    with(|s| {
-                        if s.scan_id != id {
-                            return;
-                        }
-                        s.group_of = groups.iter().enumerate().flat_map(|(gi, g)| g.members.iter().map(move |&m| (m, gi))).collect();
-                        s.groups = Arc::new(groups);
-                        s.dups_ready = true;
-                        push_selection(&ui, s);
-                        push_list(&ui, s);
-                    });
-                });
             });
         });
     });
@@ -532,14 +602,13 @@ pub fn on_show(c: &Ctx) {
 }
 
 pub fn reveal(path: &std::path::Path, is_dir: bool) {
-    let mut cmd = std::process::Command::new(crate::engine::sys::system_tool("explorer.exe"));
-    let quoted = path.to_string_lossy().contains('"');
-    if is_dir || quoted {
-        cmd.arg(if is_dir { path } else { path.parent().unwrap_or(path) });
+    use crate::engine::sys;
+    let args = if is_dir || path.to_string_lossy().contains('"') {
+        sys::quoted(if is_dir { path } else { path.parent().unwrap_or(path) })
     } else {
-        cmd.raw_arg(format!("/select,\"{}\"", path.display()));
-    }
-    let _ = cmd.spawn();
+        format!("/select,{}", sys::quoted(path))
+    };
+    let _ = sys::launch("explorer.exe", &args);
 }
 
 pub fn install(c: &Ctx) {
@@ -556,6 +625,7 @@ pub fn install(c: &Ctx) {
                 s.location = i as usize;
                 s.tree = None;
                 s.owners = None;
+                s.owners_running = false;
                 s.selected = None;
                 push_all(&ui, s);
             });
@@ -571,6 +641,8 @@ pub fn install(c: &Ctx) {
             if let Some(p) = &s.progress {
                 p.cancel.store(true, Ordering::Relaxed);
             }
+            s.dup_cancel.store(true, Ordering::Relaxed);
+            s.dups_running = false;
         });
     });
     st.on_crumb({
@@ -671,6 +743,12 @@ pub fn install(c: &Ctx) {
                 s.list_mode = m;
                 s.dup_open = None;
                 s.owner_open = None;
+                if m == 3 {
+                    begin_owners(&ui, s);
+                }
+                if m == 2 {
+                    begin_dups(&ui, s);
+                }
                 push_list(&ui, s);
             });
         }

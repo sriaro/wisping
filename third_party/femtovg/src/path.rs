@@ -11,6 +11,10 @@ use rustybuzz::ttf_parser;
 mod cache;
 pub use cache::{Convexity, PathCache};
 
+#[cfg(test)]
+#[path = "path/security_tests.rs"]
+mod security_tests;
+
 // Length proportional to radius of a cubic bezier handle for 90deg arcs.
 const KAPPA90: f32 = 0.552_284_8; // 0.552_284_749_3;
 
@@ -105,7 +109,7 @@ impl Verb {
 /// });
 /// ```
 #[derive(Default, Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", derive(Serialize))]
 pub struct Path {
     verbs: Vec<PackedVerb>,
     coords: Vec<Position>,
@@ -113,6 +117,42 @@ pub struct Path {
     dist_tol: f32,
     #[cfg_attr(feature = "serde", serde(skip))]
     pub(crate) cache: RefCell<Option<(u64, PathCache)>>,
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for Path {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename = "Path")]
+        struct SerializedPath {
+            verbs: Vec<PackedVerb>,
+            coords: Vec<Position>,
+            last_pos: Position,
+            dist_tol: f32,
+        }
+
+        let input = <SerializedPath as serde::Deserialize>::deserialize(deserializer)?;
+        let mut remaining = input.coords.len();
+        for verb in &input.verbs {
+            let count = match verb {
+                PackedVerb::MoveTo | PackedVerb::LineTo => 1,
+                PackedVerb::BezierTo => 3,
+                PackedVerb::Solid | PackedVerb::Hole | PackedVerb::Close => 0,
+            };
+            remaining = remaining.checked_sub(count)
+                .ok_or_else(|| serde::de::Error::custom("path has fewer coordinates than its verbs require"))?;
+        }
+        if remaining != 0 {
+            return Err(serde::de::Error::custom("path has unused coordinates"));
+        }
+        Ok(Self {
+            verbs: input.verbs,
+            coords: input.coords,
+            last_pos: input.last_pos,
+            dist_tol: input.dist_tol,
+            cache: RefCell::new(None),
+        })
+    }
 }
 
 impl Path {
@@ -174,7 +214,9 @@ impl Path {
     /// stroked with the given dash pattern and offset.
     ///
     /// Empty patterns, patterns whose entries sum to zero, and patterns with
-    /// non-finite or negative entries return this path unchanged. Odd-length
+    /// non-finite or negative entries return this path unchanged. Patterns with
+    /// no interval above `f32::EPSILON`, an overflowing total, or geometry that
+    /// cannot advance at the available precision also leave the path unchanged. Odd-length
     /// patterns are repeated once, matching SVG and Canvas 2D behavior.
     pub fn dashed(&self, dash: &[f32], offset: f32) -> Self {
         self.dashed_with_tolerance(dash, offset, self.dist_tol)
@@ -197,17 +239,21 @@ impl Path {
 
             let mut cursor = DashCursor::new(&dash, offset);
             for segment in contour.points.windows(2) {
-                dash_line_segment(&mut dashed, segment[0], segment[1], &mut cursor, self.dist_tol);
+                if !dash_line_segment(&mut dashed, segment[0], segment[1], &mut cursor, self.dist_tol) {
+                    return self.clone();
+                }
             }
 
             if contour.closed {
-                dash_line_segment(
+                if !dash_line_segment(
                     &mut dashed,
                     *contour.points.last().unwrap(),
                     contour.points[0],
                     &mut cursor,
                     self.dist_tol,
-                );
+                ) {
+                    return self.clone();
+                }
             }
         }
 
@@ -967,13 +1013,17 @@ fn normalize_dash_pattern(dash: &[f32]) -> Vec<f32> {
     }
 
     let sum = dash.iter().sum::<f32>();
-    if sum <= f32::EPSILON {
+    if !sum.is_finite() || sum <= f32::EPSILON || !dash.iter().any(|value| *value > f32::EPSILON) {
         return Vec::new();
     }
 
     let mut normalized = dash.to_vec();
     if normalized.len() % 2 == 1 {
         normalized.extend_from_slice(dash);
+    }
+
+    if !normalized.iter().sum::<f32>().is_finite() {
+        return Vec::new();
     }
 
     normalized
@@ -1045,15 +1095,19 @@ fn flatten_bezier(
     flatten_bezier(points, p0123, p123, p23, p3, level + 1, tess_tol, dist_tol);
 }
 
-fn dash_line_segment(path: &mut Path, start: Position, end: Position, cursor: &mut DashCursor<'_>, dist_tol: f32) {
+fn dash_line_segment(path: &mut Path, start: Position, end: Position, cursor: &mut DashCursor<'_>, dist_tol: f32) -> bool {
     let delta = end - start;
     let length = delta.mag2().sqrt();
+    if !length.is_finite() {
+        return false;
+    }
     if length <= dist_tol {
-        return;
+        return true;
     }
 
     let direction = delta * (1.0 / length);
     let mut travelled = 0.0;
+    let mut stalled_at = None;
     while travelled < length {
         if cursor.remaining <= f32::EPSILON {
             cursor.advance();
@@ -1061,6 +1115,14 @@ fn dash_line_segment(path: &mut Path, start: Position, end: Position, cursor: &m
         }
 
         let step = cursor.remaining.min(length - travelled);
+        let next = travelled + step;
+        if next <= travelled {
+            cursor.remaining -= step;
+            if stalled_at == Some(cursor.index) { return false; }
+            stalled_at.get_or_insert(cursor.index);
+            continue;
+        }
+        stalled_at = None;
         if cursor.drawing && step > dist_tol {
             let dash_start = start + direction * travelled;
             let dash_end = start + direction * (travelled + step);
@@ -1068,9 +1130,10 @@ fn dash_line_segment(path: &mut Path, start: Position, end: Position, cursor: &m
             path.line_to(dash_end.x, dash_end.y);
         }
 
-        travelled += step;
+        travelled = next;
         cursor.remaining -= step;
     }
+    true
 }
 
 /// An iterator over the verbs and coordinates of a path.

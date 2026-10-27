@@ -1,11 +1,14 @@
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use winreg::RegKey;
 use winreg::enums::*;
 
-use super::sys;
+use super::{backups, fsx, registry::target, sys};
+
+pub(super) mod integrity;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Hive {
@@ -29,19 +32,24 @@ impl Hive {
         }
     }
 
-    pub fn root(self) -> RegKey {
-        RegKey::predef(match self {
-            Hive::Machine => HKEY_LOCAL_MACHINE,
-            Hive::User => HKEY_CURRENT_USER,
-        })
-    }
-
     pub fn open(self, path: &str) -> io::Result<RegKey> {
-        self.root().open_subkey_with_flags(path, KEY_READ | KEY_WOW64_64KEY)
+        target::open(self == Hive::Machine, path, KEY_READ | KEY_WOW64_64KEY, false)
     }
 
     pub fn open_write(self, path: &str) -> io::Result<RegKey> {
-        self.root().open_subkey_with_flags(path, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)
+        target::open(self == Hive::Machine, path, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, false)
+    }
+
+    pub fn create(self, path: &str) -> io::Result<RegKey> {
+        target::open(self == Hive::Machine, path, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY, true)
+    }
+
+    pub(super) fn open_delete(self, path: &str) -> io::Result<RegKey> {
+        target::open(self == Hive::Machine, path, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY | target::DELETE, false)
+    }
+
+    pub(super) fn tree(self, path: &str) -> io::Result<target::Tree> {
+        target::Tree::open(self.open_delete(path)?, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY | target::DELETE)
     }
 }
 
@@ -72,12 +80,12 @@ pub fn has_value(key: &RegKey, name: &str) -> bool {
     key.get_raw_value(name).is_ok()
 }
 
-fn reserve(dir: &Path) -> io::Result<PathBuf> {
-    let start = fs::read_dir(dir).map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("reg"))).count()).unwrap_or(0) + 1;
+fn reserve(dir: &fsx::PinnedDir) -> io::Result<(PathBuf, fs::File)> {
+    let start = fs::read_dir(dir.path()).map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("reg"))).count()).unwrap_or(0) + 1;
     for n in start..start + 1000 {
-        let file = dir.join(format!("{:04}.reg", n));
-        match fs::OpenOptions::new().write(true).create_new(true).open(&file) {
-            Ok(_) => return Ok(file),
+        let name = format!("{:04}.reg", n);
+        match dir.create_file(name.as_ref()) {
+            Ok(file) => return Ok((dir.path().join(name), file)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(e),
         }
@@ -85,14 +93,20 @@ fn reserve(dir: &Path) -> io::Result<PathBuf> {
     Err(io::Error::other("could not create a backup file"))
 }
 
-fn verify(file: &Path, what: &str) -> io::Result<()> {
-    match fs::metadata(file) {
-        Ok(m) if m.len() >= 40 => Ok(()),
-        _ => {
-            let _ = fs::remove_file(file);
-            Err(io::Error::other(format!("backup not written for {}", what)))
-        }
+fn publish(dir: &Path, text: &str) -> io::Result<()> {
+    let bytes: Vec<u8> = [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    if bytes.len() as u64 > backups::MAX_FILE {
+        return Err(io::Error::other("backup is too large"));
     }
+    let elevated = sys::elevation()?;
+    let dir = fsx::PinnedDir::open(dir)?;
+    let (path, mut file) = reserve(&dir)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    if elevated {
+        integrity::record(&path, &bytes)?;
+    }
+    Ok(())
 }
 
 pub fn plain_name(text: &str) -> bool {
@@ -103,14 +117,73 @@ pub fn export_key(hive: Hive, path: &str, dir: &Path) -> io::Result<()> {
     if path.is_empty() || !plain_name(path) {
         return Err(io::Error::other("bad key name"));
     }
-    let file = reserve(dir)?;
-    let target = format!("{}\\{}", hive.long_name(), path);
-    let out = sys::hidden("reg.exe").arg("export").arg(&target).arg(&file).arg("/y").arg("/reg:64").output()?;
-    if !out.status.success() {
-        let _ = fs::remove_file(&file);
-        return Err(io::Error::other(format!("reg export failed for {}", path)));
+    let text = key_snapshot(hive, path)?;
+    publish(dir, &text)
+}
+
+fn key_snapshot(hive: Hive, path: &str) -> io::Result<String> {
+    let tree = target::Tree::open(hive.open(path)?, KEY_READ | KEY_WOW64_64KEY)?;
+    tree_snapshot(hive, path, &tree)
+}
+
+pub(super) fn export_tree(hive: Hive, path: &str, tree: &target::Tree, dir: &Path) -> io::Result<()> {
+    publish(dir, &tree_snapshot(hive, path, tree)?)
+}
+
+fn tree_snapshot(hive: Hive, path: &str, tree: &target::Tree) -> io::Result<String> {
+    let mut text = "Windows Registry Editor Version 5.00\r\n".to_string();
+    for (relative, key) in tree.entries() {
+        let path = if relative.is_empty() { path.to_string() } else { format!("{path}\\{relative}") };
+        if !plain_name(&path) || path.contains(['[', ']']) {
+            return Err(io::Error::other("bad key name"));
+        }
+        text.push_str(&format!("\r\n[{}\\{}]\r\n", hive.long_name(), path));
+        if text.len() as u64 > backups::MAX_FILE {
+            return Err(io::Error::other("backup is too large"));
+        }
+        append_values(key, &mut text)?;
     }
-    verify(&file, path)
+    Ok(text)
+}
+
+fn append_values(key: &RegKey, text: &mut String) -> io::Result<()> {
+    use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_NO_MORE_ITEMS};
+    use windows::Win32::System::Registry::{HKEY, RegEnumValueW};
+    use windows::core::PWSTR;
+
+    let mut name = vec![0u16; 16384];
+    let mut bytes = vec![0u8; 256];
+    let mut index = 0;
+    loop {
+        let mut name_len = name.len() as u32;
+        let mut data_len = bytes.len() as u32;
+        let mut kind = 0;
+        let status = unsafe { RegEnumValueW(HKEY(key.raw_handle()), index, Some(PWSTR(name.as_mut_ptr())), &mut name_len,
+            None, Some(&mut kind), Some(bytes.as_mut_ptr()), Some(&mut data_len)) };
+        if status == ERROR_NO_MORE_ITEMS {
+            return Ok(());
+        }
+        if data_len as u64 > backups::MAX_FILE / 6 {
+            return Err(io::Error::other("registry value cannot be backed up"));
+        }
+        if status == ERROR_MORE_DATA {
+            if data_len as usize <= bytes.len() {
+                return Err(io::Error::other("registry value name is too long"));
+            }
+            bytes.resize(data_len as usize, 0);
+            continue;
+        }
+        status.ok().map_err(io::Error::other)?;
+        let name = String::from_utf16(&name[..name_len as usize]).map_err(io::Error::other)?;
+        if !plain_name(&name) {
+            return Err(io::Error::other("bad value name"));
+        }
+        text.push_str(&format!("{}={}\r\n", quote(&name), hex(kind, &bytes[..data_len as usize])));
+        if text.len() as u64 > backups::MAX_FILE {
+            return Err(io::Error::other("backup is too large"));
+        }
+        index += 1;
+    }
 }
 
 fn quote(s: &str) -> String {
@@ -149,15 +222,16 @@ pub fn value_line(name: &str, vtype: &RegType, bytes: &[u8]) -> io::Result<Strin
 }
 
 pub fn export_value(hive: Hive, key_path: &str, value_name: &str, dir: &Path) -> io::Result<()> {
+    let key = hive.open(key_path)?;
+    export_open_value(hive, key_path, &key, value_name, dir)
+}
+
+pub(super) fn export_open_value(hive: Hive, key_path: &str, key: &RegKey, value_name: &str, dir: &Path) -> io::Result<()> {
     if key_path.is_empty() || !plain_name(key_path) {
         return Err(io::Error::other("bad key name"));
     }
-    let key = hive.open(key_path).map_err(|_| io::Error::other(format!("key missing {}", key_path)))?;
     let raw = key.get_raw_value(value_name)?;
     let line = value_line(value_name, &raw.vtype, &raw.bytes)?;
     let text = format!("Windows Registry Editor Version 5.00\r\n\r\n[{}\\{}]\r\n{}\r\n", hive.long_name(), key_path, line);
-    let bytes: Vec<u8> = [0xFF, 0xFE].into_iter().chain(text.encode_utf16().flat_map(|u| u.to_le_bytes())).collect();
-    let file = reserve(dir)?;
-    fs::write(&file, bytes)?;
-    verify(&file, value_name)
+    publish(dir, &text)
 }

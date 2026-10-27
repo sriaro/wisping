@@ -1,10 +1,11 @@
 /target
+/.App
 /data
-/Wisp.exe
-/Wisp-next.exe
+/Wisping.exe
+/Wisping-next.exe
 /_to-delete
 /tools/make-assets/target
 *.log
 /target-debug
-/wisp-location.txt
-/.pc-write-test
+/wisping-location.txt
+/.wisping-write-test

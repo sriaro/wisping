@@ -1,8 +1,7 @@
-use std::fs;
 use std::path::PathBuf;
 
 use super::cleaner::CleanTarget;
-use super::{data, sys};
+use super::{data, fsx, settings, sys};
 
 pub struct Line<'a> {
     pub name: String,
@@ -10,17 +9,15 @@ pub struct Line<'a> {
     pub after: &'a CleanTarget,
 }
 
-pub fn report_root() -> PathBuf {
-    data::root().join("reports")
-}
+const KEEP: usize = 20;
 
 pub fn write_clean(lines: &[Line]) -> Option<PathBuf> {
     let s = sys::now_local();
-    data::ensure_root();
-    fs::create_dir_all(report_root()).ok()?;
-    let path = report_root().join(format!("clean-{}.txt", sys::stamp_name()));
+    let directory = fsx::PinnedDir::create_private(data::root()).and_then(|root| root.private_child("reports".as_ref())).ok()?;
+    let name = format!("clean-{}.txt", sys::stamp_name());
+    let path = directory.path().join(&name);
     let mut out = String::new();
-    out.push_str(&format!("Wisp - clean report {:04}-{:02}-{:02} {:02}:{:02}:{:02}\r\n\r\n", s.year, s.month, s.day, s.hour, s.minute, s.second));
+    out.push_str(&format!("Wisping - clean report {:04}-{:02}-{:02} {:02}:{:02}:{:02}\r\n\r\n", s.year, s.month, s.day, s.hour, s.minute, s.second));
     out.push_str("How cleaning works\r\n");
     out.push_str("- Only files inside the locations listed below are deleted, with the masks shown.\r\n");
     out.push_str("- Temp locations keep every file newer than the age shown. Junctions and symbolic links are never followed.\r\n");
@@ -52,11 +49,28 @@ pub fn write_clean(lines: &[Line]) -> Option<PathBuf> {
             out.push_str(&format!("  Location: {}  mask {}{}{}{}\r\n", src.dir, src.mask, if src.recurse { ", subfolders included" } else { "" }, age, skipped));
         }
         out.push_str(&format!("  Before: {} in {} files\r\n  Deleted: {} in {} items\r\n  Skipped or failed: {}\r\n  Left after a new scan: {} in {} items\r\n", data::format_size(l.before.bytes), l.before.count, data::format_size(l.after.freed), l.after.removed, l.after.failed, data::format_size(l.after.bytes), l.after.count));
-        for p in &l.after.fail_samples {
-            out.push_str(&format!("    skipped: {}\r\n", p));
+        if settings::log_on() {
+            for p in &l.after.fail_samples {
+                out.push_str(&format!("    skipped: {}\r\n", p));
+            }
         }
         out.push_str("\r\n");
     }
-    fs::write(&path, out).ok()?;
+    directory.write_file(name.as_ref(), out.as_bytes()).ok()?;
+    prune(&directory, KEEP);
     Some(path)
+}
+
+fn prune(directory: &fsx::PinnedDir, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(directory.path()) else { return };
+    let mut names: Vec<_> = entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .map(|e| e.file_name())
+        .filter(|n| n.to_str().is_some_and(|n| n.starts_with("clean-") && n.ends_with(".txt")))
+        .collect();
+    names.sort();
+    for name in names.iter().rev().skip(keep) {
+        let _ = directory.remove_file(name);
+    }
 }

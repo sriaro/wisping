@@ -1,11 +1,14 @@
-use std::fs;
-use std::io;
+use std::ffi::{OsStr, OsString};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::data;
 use super::fileinfo;
 use super::fsx;
+use super::programs;
 use super::registry;
 use super::startup::{StartupEntry, StartupKind};
 use super::sys;
@@ -14,8 +17,12 @@ use super::regbackup::Hive;
 const MAX_DEPTH: usize = 5;
 const MAX_FILE: u64 = 1024 * 1024;
 
+#[cfg(test)]
+#[path = "tasks/security_tests.rs"]
+mod security_tests;
+
 pub fn tasks_root() -> PathBuf {
-    PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string())).join("System32\\Tasks")
+    super::winenv::system_dir().join("Tasks")
 }
 
 pub fn decode(bytes: &[u8]) -> String {
@@ -85,20 +92,28 @@ pub fn parse(xml: &str) -> Parsed {
     Parsed { command, author, enabled }
 }
 
-fn walk(dir: &Path, rel: &str, depth: usize, out: &mut Vec<(String, PathBuf)>) {
-    let Ok(rd) = fs::read_dir(dir) else { return };
+struct TaskFile {
+    task: String,
+    dir: Arc<fsx::PinnedDir>,
+    name: OsString,
+}
+
+fn walk(dir: Arc<fsx::PinnedDir>, rel: &str, depth: usize, out: &mut Vec<TaskFile>) {
+    let Ok(rd) = fs::read_dir(dir.path()) else { return };
     for e in rd.flatten() {
         let Ok(meta) = e.metadata() else { continue };
         if fsx::attrs_reparse(meta.file_attributes()) {
             continue;
         }
-        let task = format!("{}\\{}", rel, e.file_name().to_string_lossy());
+        let name = e.file_name();
+        let task = format!("{}\\{}", rel, name.to_string_lossy());
         if meta.is_dir() {
-            if depth < MAX_DEPTH {
-                walk(&e.path(), &task, depth + 1, out);
+            if depth < MAX_DEPTH
+                && let Ok(sub) = dir.child(&name, false) {
+                    walk(Arc::new(sub), &task, depth + 1, out);
             }
         } else if meta.is_file() && meta.len() <= MAX_FILE {
-            out.push((task, e.path()));
+            out.push(TaskFile { task, dir: dir.clone(), name });
         }
     }
 }
@@ -107,11 +122,22 @@ fn is_system_path(task: &str) -> bool {
     task.to_lowercase().starts_with("\\microsoft\\windows\\")
 }
 
-fn entry(task: &str, path: &Path) -> Option<StartupEntry> {
-    let xml = decode(&fs::read(path).ok()?);
+const HOSTS: [&str; 14] = [
+    "wmic.exe", "msiexec.exe", "explorer.exe", "cmstp.exe", "control.exe", "msdt.exe", "installutil.exe", "regasm.exe", "regsvcs.exe", "msbuild.exe", "dllhost.exe", "odbcconf.exe", "presentationhost.exe", "wuauclt.exe",
+];
+
+fn windows_component(exe: &str) -> bool {
+    let path = Path::new(exe);
+    let leaf = path.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    fsx::under_windir(exe) && fileinfo::admin_only(path) && !programs::SHELLS.contains(&leaf.as_str()) && !HOSTS.contains(&leaf.as_str())
+}
+
+fn entry(file: &TaskFile) -> Option<StartupEntry> {
+    let xml = decode(&read_pinned(&file.dir, &file.name).ok()?);
     if !xml.contains("<Task") {
         return None;
     }
+    let task = file.task.as_str();
     let parsed = parse(&xml);
     let exe = registry::first_path(&parsed.command);
     let publisher = exe.as_deref().map(fileinfo::publisher).filter(|p| !p.is_empty()).unwrap_or(parsed.author);
@@ -125,17 +151,18 @@ fn entry(task: &str, path: &Path) -> Option<StartupEntry> {
         hive: Hive::Machine,
         key_path: task.to_string(),
         value_name: leaf,
-        file_path: Some(path.to_path_buf()),
+        file_path: Some(file.dir.path().join(&file.name)),
         publisher,
-        system: is_system_path(task),
+        system: is_system_path(task) || exe.as_deref().is_some_and(windows_component),
         ..Default::default()
     })
 }
 
 pub fn list() -> Vec<StartupEntry> {
+    let Ok(root) = fsx::PinnedDir::open(&tasks_root()) else { return Vec::new() };
     let mut files = Vec::new();
-    walk(&tasks_root(), "", 0, &mut files);
-    sys::par_map(&files, |(task, path)| entry(task, path))
+    walk(Arc::new(root), "", 0, &mut files);
+    sys::par_map(&files, entry)
 }
 
 fn valid_task(e: &StartupEntry) -> io::Result<PathBuf> {
@@ -165,7 +192,7 @@ fn schtasks(args: &[&str]) -> io::Result<()> {
 pub fn set_enabled(e: &mut StartupEntry, enable: bool) -> io::Result<()> {
     let file = valid_task(e)?;
     schtasks(&["/Change", "/TN", &e.key_path, if enable { "/ENABLE" } else { "/DISABLE" }])?;
-    let now = fs::read(&file).map(|b| parse(&decode(&b)).enabled).unwrap_or(enable);
+    let now = read_task(&file).map(|b| parse(&decode(&b)).enabled).unwrap_or(enable);
     if now != enable {
         return Err(io::Error::other("the task did not change"));
     }
@@ -174,13 +201,41 @@ pub fn set_enabled(e: &mut StartupEntry, enable: bool) -> io::Result<()> {
     Ok(())
 }
 
-pub fn delete(e: &StartupEntry, backup_dir: &Path) -> io::Result<()> {
-    let file = valid_task(e)?;
-    let copy = backup_dir.join(format!("task-{}.xml", e.value_name.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_")));
-    fs::copy(&file, &copy)?;
-    if fs::metadata(&copy)?.len() != fs::metadata(&file)?.len() {
+fn read_task(file: &Path) -> io::Result<Vec<u8>> {
+    let (Some(parent), Some(name)) = (file.parent(), file.file_name()) else { return Err(io::Error::other("bad task")) };
+    read_pinned(&fsx::PinnedDir::open(parent)?, name)
+}
+
+fn read_pinned(dir: &fsx::PinnedDir, name: &OsStr) -> io::Result<Vec<u8>> {
+    let mut source = dir.read_file(name)?;
+    let len = source.metadata()?.len();
+    if len > MAX_FILE {
+        return Err(io::Error::other("bad task"));
+    }
+    let mut bytes = Vec::new();
+    (&mut source).take(MAX_FILE + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 != len {
         return Err(io::Error::other("backup copy failed"));
     }
+    Ok(bytes)
+}
+
+fn backup(file: &Path, backup_dir: &Path, name: &OsStr) -> io::Result<(fsx::PinnedDir, File)> {
+    let bytes = read_task(file)?;
+    let target = fsx::PinnedDir::open(backup_dir)?;
+    let mut copy = target.create_file(name)?;
+    copy.write_all(&bytes)?;
+    copy.sync_all()?;
+    if copy.metadata()?.len() != bytes.len() as u64 {
+        return Err(io::Error::other("backup copy failed"));
+    }
+    Ok((target, copy))
+}
+
+pub fn delete(e: &StartupEntry, backup_dir: &Path) -> io::Result<()> {
+    let file = valid_task(e)?;
+    let name = format!("task-{}.xml", e.value_name.replace(['\\', '/', ':', '*', '?', '"', '<', '>', '|'], "_"));
+    let _held = backup(&file, backup_dir, name.as_ref())?;
     schtasks(&["/Delete", "/TN", &e.key_path, "/F"])?;
     data::log(&format!("task deleted {}", e.key_path));
     Ok(())

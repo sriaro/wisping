@@ -155,7 +155,14 @@ export component StartupPage inherits PageFrame {
                     }
                 }
             }
-            if AppState.startups.length == 0: EmptyState {
+            if AppState.startups.length == 0 && AppState.startups-loading: Text {
+                text: T.s("start.loading");
+                color: Theme.text-dim;
+                font-size: 13px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            if AppState.startups.length == 0 && !AppState.startups-loading: EmptyState {
                 icon: "power";
                 title: T.s("start.empty");
                 sub: AppState.start-sub;

@@ -534,11 +534,11 @@ impl Paint {
     ///
     /// # Example
     /// ```
-    /// use femtovg::{Paint, Path, Color, Canvas, ImageFlags, renderer::Void};
+    /// use femtovg::{Paint, Path, Canvas, ImageFlags, PixelFormat, renderer::Void};
     ///
     /// let mut canvas = Canvas::new(Void).expect("Cannot create canvas");
     ///
-    /// let image_id = canvas.load_image_file("examples/assets/rust-logo.png", ImageFlags::GENERATE_MIPMAPS).expect("Cannot create image");
+    /// let image_id = canvas.create_image_empty(85, 85, PixelFormat::Rgba8, ImageFlags::empty()).expect("Cannot create image");
     /// let fill_paint = Paint::image(image_id, 10.0, 10.0, 85.0, 85.0, 0.0, 1.0);
     ///
     /// let mut path = Path::new();

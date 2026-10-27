@@ -4,6 +4,10 @@ use glow::HasContext;
 
 use crate::{ErrorKind, ImageFlags, ImageInfo, ImageSource, PixelFormat};
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "gl_texture/security_tests.rs"]
+mod security_tests;
+
 #[derive(Debug)]
 pub struct GlTexture {
     id: <glow::Context as glow::HasContext>::Texture,
@@ -210,11 +214,14 @@ impl GlTexture {
             context.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1);
             if !opengles_2_0 {
                 context.pixel_store_i32(glow::UNPACK_ROW_LENGTH, size.width as i32);
+                context.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
+                context.pixel_store_i32(glow::UNPACK_SKIP_ROWS, 0);
             }
         }
 
         match src {
             ImageSource::Gray(data) => unsafe {
+                let pixels = data.to_contiguous_buf().0;
                 let format = if opengles_2_0 { glow::LUMINANCE } else { glow::RED };
 
                 context.tex_sub_image_2d(
@@ -226,10 +233,11 @@ impl GlTexture {
                     size.height as i32,
                     format,
                     glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(data.buf().align_to().1)),
+                    glow::PixelUnpackData::Slice(Some(pixels.align_to().1)),
                 );
             },
             ImageSource::Rgb(data) => unsafe {
+                let pixels = data.to_contiguous_buf().0;
                 context.tex_sub_image_2d(
                     glow::TEXTURE_2D,
                     0,
@@ -239,10 +247,11 @@ impl GlTexture {
                     size.height as i32,
                     glow::RGB,
                     glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(data.buf().align_to().1)),
+                    glow::PixelUnpackData::Slice(Some(pixels.align_to().1)),
                 );
             },
             ImageSource::Rgba(data) => unsafe {
+                let pixels = data.to_contiguous_buf().0;
                 context.tex_sub_image_2d(
                     glow::TEXTURE_2D,
                     0,
@@ -252,7 +261,7 @@ impl GlTexture {
                     size.height as i32,
                     glow::RGBA,
                     glow::UNSIGNED_BYTE,
-                    glow::PixelUnpackData::Slice(Some(data.buf().align_to().1)),
+                    glow::PixelUnpackData::Slice(Some(pixels.align_to().1)),
                 );
             },
             #[cfg(target_arch = "wasm32")]

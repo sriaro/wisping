@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use slint::{ComponentHandle, ModelRc, VecModel};
 
@@ -8,6 +8,7 @@ use crate::i18n;
 use crate::{BackupsState, DataItem, MainWindow};
 
 static SHOWN_TAB: AtomicI32 = AtomicI32::new(-1);
+static BUSY: AtomicBool = AtomicBool::new(false);
 
 fn row(id: &str, title: String, desc: String, icon: &str, tint: i32) -> DataItem {
     DataItem { id: id.into(), title: title.into(), desc: desc.into(), state: "".into(), icon: icon.into(), tint, toggle: false, on: false, button: "".into(), enabled: true, deletable: false }
@@ -73,7 +74,7 @@ fn data_rows() -> Vec<DataItem> {
     if !data::is_custom() {
         folder.state = i18n::get("backups.folder.default").into();
     }
-    let count = backups::list().len();
+    let count = backups::count();
     let mut clear = row("clear", i18n::get("backups.clear.title"), i18n::fmt("backups.clear.desc", &[&count.to_string()]), "trash", 6);
     clear.button = i18n::get("backups.clear.btn").into();
     clear.enabled = count > 0;
@@ -140,39 +141,51 @@ fn push(ui: &MainWindow) {
 }
 
 fn restore(c: &Ctx, id: String) {
+    in_background(c, move || backups::restore(&id).map(|_| i18n::get("backups.restored")).map_err(|e| e.to_string()));
+}
+
+fn in_background(c: &Ctx, work: impl FnOnce() -> Result<String, String> + Send + 'static) {
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if let Some(ui) = c.weak.upgrade() {
+        ui.global::<BackupsState>().set_busy(true);
+    }
     let weak = c.weak.clone();
     let core = c.core.clone();
     std::thread::spawn(move || {
-        let result = backups::restore(&id);
+        let _reset = crate::app::panic_reset(&weak, |ui| {
+            BUSY.store(false, Ordering::SeqCst);
+            ui.global::<BackupsState>().set_busy(false);
+            push(ui);
+        });
+        let result = work();
+        BUSY.store(false, Ordering::SeqCst);
         let _ = weak.upgrade_in_event_loop(move |ui| {
             crate::winui::trim_soon();
+            ui.global::<BackupsState>().set_busy(false);
             let c = Ctx::new(ui.as_weak(), core);
             match result {
-                Ok(_) => toast(&c, i18n::get("backups.restored")),
-                Err(e) => show_error(&c, e.to_string()),
+                Ok(text) => toast(&c, text),
+                Err(e) => show_error(&c, e),
             }
+            push(&ui);
         });
     });
 }
 
 fn open_path(path: &std::path::Path) {
-    let _ = std::process::Command::new(sys::system_tool("explorer.exe")).arg(path).spawn();
+    let _ = sys::launch("explorer.exe", &sys::quoted(path));
 }
 
 fn act(c: &Ctx, id: &str) {
     match id {
         "folder" => {
             if let Some(dir) = crate::winui::pick_folder() {
-                match data::set_location(&dir) {
-                    Ok(()) => toast(c, i18n::get("backups.folder.moved")),
-                    Err(e) => show_error(c, e.to_string()),
-                }
+                in_background(c, move || data::set_location(&dir).map(|()| i18n::get("backups.folder.moved")).map_err(|e| e.to_string()));
             }
         }
-        "reset" => match data::reset_location() {
-            Ok(()) => toast(c, i18n::get("backups.folder.reset")),
-            Err(e) => show_error(c, e.to_string()),
-        },
+        "reset" => in_background(c, || data::reset_location().map(|()| i18n::get("backups.folder.reset")).map_err(|e| e.to_string())),
         "open" => {
             let dir = data::ensure_root();
             open_path(dir);
@@ -182,7 +195,7 @@ fn act(c: &Ctx, id: &str) {
             toast(c, i18n::get("backups.clearhist.done"));
         }
         "clear" => {
-            let count = backups::list().len().to_string();
+            let count = backups::count().to_string();
             let c2 = c.clone();
             confirm(
                 c,
@@ -191,19 +204,15 @@ fn act(c: &Ctx, id: &str) {
                 i18n::get("backups.clear.btn"),
                 true,
                 Box::new(move || {
-                    let n = backups::delete_all();
-                    toast(&c2, i18n::fmt("backups.deleted.many", &[&n.to_string()]));
-                    if let Some(ui) = c2.weak.upgrade() {
-                        push(&ui);
-                    }
+                    in_background(&c2, || Ok(i18n::fmt("backups.deleted.many", &[&backups::delete_all().to_string()])));
                 }),
             );
         }
         "viewlog" => {
-            let _ = std::process::Command::new(sys::system_tool("notepad.exe")).arg(data::log_path()).spawn();
+            let _ = sys::launch("notepad.exe", &sys::quoted(&data::log_path()));
         }
         _ => {
-            let when = backups::list().into_iter().find(|b| b.id == id).map(|b| b.when).unwrap_or_else(|| id.to_string());
+            let when = backups::when_of(id);
             let owned = id.to_string();
             let c2 = c.clone();
             confirm(c, i18n::get("backups.restore.title"), i18n::fmt("backups.restore.text", &[&when]), i18n::get("backups.restore"), false, Box::new(move || restore(&c2, owned)));
@@ -271,7 +280,7 @@ pub fn install(c: &Ctx) {
     st.on_remove({
         let c = c.clone();
         move |id| {
-            let when = backups::list().into_iter().find(|b| b.id == id.as_str()).map(|b| b.when).unwrap_or_else(|| id.to_string());
+            let when = backups::when_of(&id);
             let owned = id.to_string();
             let c2 = c.clone();
             confirm(
@@ -281,13 +290,7 @@ pub fn install(c: &Ctx) {
                 i18n::get("backups.delete.btn"),
                 true,
                 Box::new(move || {
-                    match backups::delete(&owned) {
-                        Ok(()) => toast(&c2, i18n::get("backups.deleted")),
-                        Err(e) => show_error(&c2, e.to_string()),
-                    }
-                    if let Some(ui) = c2.weak.upgrade() {
-                        push(&ui);
-                    }
+                    in_background(&c2, move || backups::delete(&owned).map(|()| i18n::get("backups.deleted")).map_err(|e| e.to_string()));
                 }),
             );
         }

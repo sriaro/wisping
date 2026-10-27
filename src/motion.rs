@@ -10,6 +10,9 @@ use crate::{AppState, MainWindow, T, Theme};
 
 thread_local! {
     static FADE: Timer = Timer::default();
+    static LANG: Timer = Timer::default();
+    static FADING: Cell<bool> = const { Cell::new(false) };
+    static SWITCHING: Cell<bool> = const { Cell::new(false) };
 }
 
 thread_local! {
@@ -90,7 +93,23 @@ pub fn begin_switch(c: &Ctx, page: i32) {
     });
 }
 
+fn sync_quiet(theme: &Theme) {
+    theme.set_quiet(FADING.get() || SWITCHING.get());
+}
+
+fn end_fade(ui: &MainWindow) {
+    FADE.with(|f| f.stop());
+    let theme = ui.global::<Theme>();
+    theme.set_fade_opacity(0.0);
+    theme.set_fade_image(slint::Image::default());
+    FADING.set(false);
+    sync_quiet(&theme);
+}
+
 pub fn crossfade(ui: &MainWindow, change: impl FnOnce()) {
+    if FADING.get() {
+        end_fade(ui);
+    }
     let theme = ui.global::<Theme>();
     let Ok(shot) = ui.window().take_snapshot() else {
         change();
@@ -98,7 +117,8 @@ pub fn crossfade(ui: &MainWindow, change: impl FnOnce()) {
     };
     theme.set_fade_image(slint::Image::from_rgba8(shot));
     theme.set_fade_opacity(1.0);
-    theme.set_quiet(true);
+    FADING.set(true);
+    sync_quiet(&theme);
     change();
     let weak = ui.as_weak();
     let start = std::time::Instant::now();
@@ -106,14 +126,10 @@ pub fn crossfade(ui: &MainWindow, change: impl FnOnce()) {
         f.start(slint::TimerMode::Repeated, Duration::from_millis(8), move || {
             let Some(ui) = weak.upgrade() else { return };
             let k = (start.elapsed().as_secs_f32() / 0.32).min(1.0);
-            let theme = ui.global::<Theme>();
             if k >= 1.0 {
-                theme.set_fade_opacity(0.0);
-                theme.set_fade_image(slint::Image::default());
-                theme.set_quiet(false);
-                FADE.with(|f| f.stop());
+                end_fade(&ui);
             } else {
-                theme.set_fade_opacity((1.0 - k).powi(2));
+                ui.global::<Theme>().set_fade_opacity((1.0 - k).powi(2));
             }
         });
     });
@@ -127,7 +143,7 @@ fn swap_language(c: &Ctx, now: bool) {
     apply_fonts(&ui);
     let t = ui.global::<T>();
     t.set_rev(t.get_rev() + 1);
-    push_all(&ui, &c.core.lock().unwrap());
+    push_all(&ui, &c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
     push_low_disk(&ui);
     if idle {
         ui.global::<AppState>().set_status(i18n::get("status.idle").into());
@@ -138,14 +154,20 @@ fn swap_language(c: &Ctx, now: bool) {
 pub fn switch_language(c: &Ctx) {
     const OUT: f32 = 0.26;
     const IN: f32 = 0.50;
+    let Some(ui) = c.weak.upgrade() else { return };
+    if SWITCHING.get() {
+        return;
+    }
+    if FADING.get() {
+        end_fade(&ui);
+    }
+    SWITCHING.set(true);
+    sync_quiet(&ui.global::<Theme>());
     let now = !i18n::zh();
     let c = c.clone();
-    if let Some(ui) = c.weak.upgrade() {
-        ui.global::<Theme>().set_quiet(true);
-    }
     let start = std::time::Instant::now();
     let resumed: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
-    FADE.with(|f| {
+    LANG.with(|f| {
         f.start(slint::TimerMode::Repeated, Duration::from_millis(8), move || {
             let Some(ui) = c.weak.upgrade() else { return };
             let theme = ui.global::<Theme>();
@@ -167,8 +189,9 @@ pub fn switch_language(c: &Ctx) {
                         theme.set_content_opacity(ease(k));
                     } else {
                         theme.set_content_opacity(1.0);
-                        theme.set_quiet(false);
-                        FADE.with(|f| f.stop());
+                        SWITCHING.set(false);
+                        sync_quiet(&theme);
+                        LANG.with(|f| f.stop());
                     }
                 }
             }

@@ -108,7 +108,7 @@ pub fn split_for(command: &str, per_user: bool) -> Option<(String, String)> {
     (absolute && exe.to_lowercase().ends_with(".exe") && !exe.contains(['<', '>', '|', '"', '*', '?'])).then_some((exe, args))
 }
 
-const SHELLS: [&str; 18] = [
+pub(super) const SHELLS: [&str; 18] = [
     "cmd.exe", "cmd", "powershell.exe", "powershell", "pwsh.exe", "pwsh", "wscript.exe", "cscript.exe", "mshta.exe", "bash.exe", "wsl.exe", "conhost.exe", "rundll32.exe", "regsvr32.exe", "forfiles.exe", "schtasks.exe", "certutil.exe", "bitsadmin.exe",
 ];
 

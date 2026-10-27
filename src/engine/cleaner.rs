@@ -1,4 +1,5 @@
 use std::fs;
+use std::io;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -18,6 +19,10 @@ use super::sys;
 
 static KEEP_RECENT: AtomicBool = AtomicBool::new(true);
 static WALKERS: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+#[path = "cleaner/security_tests.rs"]
+mod security_tests;
 
 pub fn set_keep_recent(value: bool) {
     KEEP_RECENT.store(value, Ordering::SeqCst);
@@ -78,14 +83,23 @@ fn add_reg(list: &mut [CleanTarget], at: usize, path: &str) {
     list[at].reg.push(path.to_string());
 }
 
-const EXPLORER_KEYS: [&str; 6] = [
+const EXPLORER_KEYS: [&str; 7] = [
     "software\\microsoft\\windows\\currentversion\\explorer\\runmru",
     "software\\microsoft\\windows\\currentversion\\explorer\\typedpaths",
     "software\\microsoft\\windows\\currentversion\\explorer\\recentdocs",
     "software\\microsoft\\windows\\currentversion\\explorer\\wordwheelquery",
     "software\\microsoft\\windows\\currentversion\\explorer\\comdlg32\\opensavepidlmru",
     "software\\microsoft\\windows\\currentversion\\explorer\\comdlg32\\lastvisitedpidlmru",
+    "software\\microsoft\\windows\\currentversion\\explorer\\userassist",
 ];
+
+const OFFICE_APPS: [&str; 7] = ["word", "excel", "powerpoint", "access", "publisher", "visio", "project"];
+const OFFICE_LISTS: [&str; 3] = ["file mru", "place mru", "user mru"];
+
+fn office_keys() -> &'static [String] {
+    static KEYS: OnceLock<Vec<String>> = OnceLock::new();
+    KEYS.get_or_init(|| OFFICE_APPS.iter().flat_map(|app| OFFICE_LISTS.iter().map(move |list| format!("software\\microsoft\\office\\16.0\\{}\\{}", app, list))).collect())
+}
 
 const TOOL_KEYS: [&str; 4] = [
     "software\\microsoft\\microsoft management console\\recent file list",
@@ -121,12 +135,12 @@ fn reg_path_ok(entry: &str) -> bool {
         let v = v.to_lowercase();
         return TOOL_VALUES.iter().any(|(k, n)| lower == *k && v == *n) || (test && !v.is_empty());
     }
-    test || [&EXPLORER_KEYS[..], &TOOL_KEYS, &RDP_KEYS, &IE_KEYS, &WINRAR_KEYS].iter().flat_map(|l| l.iter()).any(|k| under(k))
+    test || [&EXPLORER_KEYS[..], &TOOL_KEYS, &RDP_KEYS, &IE_KEYS, &WINRAR_KEYS].iter().flat_map(|l| l.iter()).any(|k| under(k)) || office_keys().iter().any(|k| under(k))
 }
 
-fn reg_open(path: &str, write: bool) -> Option<RegKey> {
+fn reg_open(path: &str, write: bool) -> io::Result<RegKey> {
     let flags = if write { KEY_READ | KEY_WRITE } else { KEY_READ };
-    RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(path, flags).ok()
+    registry::target::open(false, path, flags, false)
 }
 
 fn reg_entry_count(entry: &str) -> u64 {
@@ -137,14 +151,17 @@ fn reg_entry_count(entry: &str) -> u64 {
 }
 
 fn reg_entry_clear(entry: &str) -> (u64, u64) {
-    match reg_split(entry) {
-        (path, Some(value)) => match reg_open(path, true) {
-            Some(k) if k.get_raw_value(value).is_ok() => {
-                if k.delete_value(value).is_ok() { (1, 0) } else { (0, 1) }
-            }
-            _ => (0, 0),
-        },
-        (path, None) => reg_open(path, true).map(|k| reg_clear(&k, 0)).unwrap_or((0, 0)),
+    let (path, value) = reg_split(entry);
+    let key = match reg_open(path, true) {
+        Ok(key) => key,
+        Err(e) => return (0, u64::from(e.kind() != io::ErrorKind::NotFound)),
+    };
+    match value {
+        Some(value) if key.get_raw_value(value).is_ok() => {
+            if key.delete_value(value).is_ok() { (1, 0) } else { (0, 1) }
+        }
+        Some(_) => (0, 0),
+        None => reg_clear(&key, 0),
     }
 }
 
@@ -152,7 +169,7 @@ fn reg_count(key: &RegKey, depth: u32) -> u64 {
     let mut n = key.enum_values().flatten().count() as u64;
     if depth < 4 {
         for sub in key.enum_keys().flatten() {
-            if let Ok(child) = key.open_subkey_with_flags(&sub, KEY_READ) {
+            if let Ok(child) = registry::target::open_child(key, &sub, KEY_READ) {
                 n += reg_count(&child, depth + 1);
             }
         }
@@ -173,10 +190,14 @@ fn reg_clear(key: &RegKey, depth: u32) -> (u64, u64) {
     if depth < 4 {
         let subs: Vec<String> = key.enum_keys().flatten().collect();
         for sub in subs {
-            if let Ok(child) = key.open_subkey_with_flags(&sub, KEY_READ | KEY_WRITE) {
-                let (d, f) = reg_clear(&child, depth + 1);
-                done += d;
-                failed += f;
+            match registry::target::open_child(key, &sub, KEY_READ | KEY_WRITE) {
+                Ok(child) => {
+                    let (d, f) = reg_clear(&child, depth + 1);
+                    done += d;
+                    failed += f;
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(_) => failed += 1,
             }
         }
     }
@@ -212,6 +233,7 @@ const OPERA_ROOTS: [&str; 2] = ["%APPDATA%\\Opera Software\\Opera Stable", "%APP
 pub fn steam_ok(path: &str) -> bool {
     let p = Path::new(path);
     path.len() >= 6
+        && fsx::local_drive_path(path)
         && !path.starts_with("\\\\")
         && p.is_absolute()
         && fsx::norm_key(p).is_some_and(|k| k != fsx::windir())
@@ -230,7 +252,7 @@ fn steam_dir() -> Option<String> {
 pub fn group_of(id: &str) -> &'static str {
     match id {
         "chrome" | "edge" | "brave" | "otherbrowsers" | "firefox" | "history" | "cookies" | "sessions" | "metrics" | "iecache" | "iedata" => "browsers",
-        "steam" | "onedrive" | "nvidia" | "winrar" | "devcache" => "apps",
+        "steam" | "onedrive" | "nvidia" | "winrar" | "devcache" | "appcache" | "office" => "apps",
         "aiapps" | "aicli" | "aigpu" | "aimodelcache" | "aihistory" | "aimodels" => "ai",
         _ => "windows",
     }
@@ -248,10 +270,30 @@ fn group_rank(id: &str) -> u8 {
 pub fn risk_of(id: &str) -> u8 {
     match id {
         "recycle" | "aihistory" | "aimodels" => 2,
-        "recent" | "shader" | "wu" | "logs" | "history" | "cookies" | "sessions" | "iedata" | "explorer" | "wintools" | "rdp" | "winrar" | "steam" | "prefetch" | "aicli" | "aimodelcache" => 1,
+        "recent" | "shader" | "wu" | "logs" | "history" | "cookies" | "sessions" | "iedata" | "explorer" | "wintools" | "rdp" | "winrar" | "steam" | "prefetch" | "aicli" | "aimodelcache" | "devcache" | "office" => 1,
         _ => 0,
     }
 }
+
+const APP_ROOTS: [&str; 5] = [
+    "%APPDATA%\\Code",
+    "%APPDATA%\\discord",
+    "%APPDATA%\\Microsoft\\Teams",
+    "%LOCALAPPDATA%\\Packages\\MSTeams_8wekyb3d8bbwe\\LocalCache\\Microsoft\\MSTeams\\EBWebView\\*",
+    "%APPDATA%\\Slack",
+];
+
+const DEV_CACHES: [&str; 9] = [
+    "%LOCALAPPDATA%\\npm-cache",
+    "%LOCALAPPDATA%\\pnpm-cache",
+    "%LOCALAPPDATA%\\pip\\Cache",
+    "%LOCALAPPDATA%\\uv\\cache",
+    "%LOCALAPPDATA%\\NuGet\\v3-cache",
+    "%USERPROFILE%\\.cargo\\registry\\cache",
+    "%LOCALAPPDATA%\\go-build",
+    "%LOCALAPPDATA%\\Yarn\\Cache",
+    "%USERPROFILE%\\.gradle\\caches",
+];
 
 const AI_APP_ROOTS: [&str; 8] = [
     "%LOCALAPPDATA%\\Packages\\Claude_*\\LocalCache\\Roaming\\Claude",
@@ -309,12 +351,14 @@ pub fn targets() -> Vec<CleanTarget> {
     add(&mut l, i, "%LOCALAPPDATA%\\NVIDIA\\GLCache", "*", true, 0);
     add(&mut l, i, "%LOCALAPPDATA%\\AMD\\DxCache", "*", true, 0);
     let i = make(&mut l, "wu", true, false);
-    add(&mut l, i, "%WINDIR%\\SoftwareDistribution\\Download", "*", true, 0);
+    add(&mut l, i, "%WINDIR%\\SoftwareDistribution\\Download", "*", true, 24);
     let i = make(&mut l, "do", true, true);
     add(&mut l, i, "%WINDIR%\\ServiceProfiles\\NetworkService\\AppData\\Local\\Microsoft\\Windows\\DeliveryOptimization\\Cache", "*", true, 0);
     let i = make(&mut l, "logs", true, false);
     add(&mut l, i, "%WINDIR%\\Logs\\CBS", "*.log", false, 24);
     add(&mut l, i, "%WINDIR%\\Logs\\DISM", "*.log", false, 24);
+    add(&mut l, i, "%WINDIR%\\Logs\\WindowsUpdate", "*.etl", false, 24);
+    add(&mut l, i, "%PROGRAMDATA%\\USOShared\\Logs", "*.etl", false, 24);
     let i = make(&mut l, "chrome", false, true);
     add_chromium(&mut l, i, CHROMIUM_ROOTS[0]);
     let i = make(&mut l, "edge", false, true);
@@ -376,7 +420,7 @@ pub fn targets() -> Vec<CleanTarget> {
     }
     add(&mut l, i, "%APPDATA%\\Mozilla\\Firefox\\Crash Reports", "*", true, 0);
     let i = make(&mut l, "iecache", false, true);
-    add(&mut l, i, "%LOCALAPPDATA%\\Microsoft\\Windows\\INetCache", "*", true, 0);
+    add(&mut l, i, "%LOCALAPPDATA%\\Microsoft\\Windows\\INetCache", "*", true, 24);
     let i = make(&mut l, "iedata", false, false);
     add(&mut l, i, "%LOCALAPPDATA%\\Microsoft\\Windows\\History", "*", true, 0);
     add(&mut l, i, "%LOCALAPPDATA%\\Microsoft\\Windows\\INetCookies", "*", true, 0);
@@ -394,10 +438,16 @@ pub fn targets() -> Vec<CleanTarget> {
     for (k, v) in TOOL_VALUES {
         add_reg(&mut l, i, &format!("{}|{}", k, v));
     }
+    add(&mut l, i, "%APPDATA%\\Microsoft\\Windows\\PowerShell\\PSReadLine", "*_history.txt", false, 0);
     let i = make(&mut l, "rdp", false, false);
     for k in RDP_KEYS {
         add_reg(&mut l, i, k);
     }
+    add(&mut l, i, "%LOCALAPPDATA%\\Microsoft\\Terminal Server Client\\Cache", "*", false, 0);
+    let i = make(&mut l, "storeapps", false, false);
+    add(&mut l, i, "%LOCALAPPDATA%\\Packages\\*\\AC\\INetCache", "*", true, 0);
+    add(&mut l, i, "%LOCALAPPDATA%\\Packages\\*\\AC\\Temp", "*", true, 24);
+    add(&mut l, i, "%LOCALAPPDATA%\\Packages\\*\\TempState", "*", true, 24);
     let i = make(&mut l, "defender", true, false);
     add(&mut l, i, "%PROGRAMDATA%\\Microsoft\\Windows Defender\\Support", "MP*.log", false, 0);
     add(&mut l, i, "%PROGRAMDATA%\\Microsoft\\Windows Defender\\Support", "MpWpp*.bin", false, 0);
@@ -417,10 +467,21 @@ pub fn targets() -> Vec<CleanTarget> {
     for k in WINRAR_KEYS {
         add_reg(&mut l, i, k);
     }
+    let i = make(&mut l, "office", false, false);
+    for k in office_keys() {
+        add_reg(&mut l, i, k);
+    }
+    add(&mut l, i, "%APPDATA%\\Microsoft\\Office\\Recent", "*", false, 0);
     let i = make(&mut l, "devcache", false, false);
-    add(&mut l, i, "%LOCALAPPDATA%\\npm-cache", "*", true, 0);
-    add(&mut l, i, "%LOCALAPPDATA%\\pip\\Cache", "*", true, 0);
-    add(&mut l, i, "%LOCALAPPDATA%\\NuGet\\v3-cache", "*", true, 0);
+    for d in DEV_CACHES {
+        add(&mut l, i, d, "*", true, 0);
+    }
+    let i = make(&mut l, "appcache", false, false);
+    for root in APP_ROOTS {
+        for n in AI_APP_CACHES {
+            add(&mut l, i, &format!("{}\\{}", root, n), "*", true, 0);
+        }
+    }
     let i = make(&mut l, "aiapps", false, true);
     for root in AI_APP_ROOTS {
         for n in AI_APP_CACHES {
@@ -428,8 +489,11 @@ pub fn targets() -> Vec<CleanTarget> {
         }
     }
     let i = make(&mut l, "aicli", false, false);
-    for d in ["%USERPROFILE%\\.claude\\cache", "%USERPROFILE%\\.claude\\shell-snapshots", "%USERPROFILE%\\.codex\\cache", "%USERPROFILE%\\.codex\\.tmp", "%USERPROFILE%\\.gemini\\tmp"] {
+    for d in ["%USERPROFILE%\\.claude\\cache", "%USERPROFILE%\\.codex\\cache"] {
         add(&mut l, i, d, "*", true, 0);
+    }
+    for d in ["%USERPROFILE%\\.claude\\shell-snapshots", "%USERPROFILE%\\.codex\\.tmp", "%USERPROFILE%\\.gemini\\tmp"] {
+        add(&mut l, i, d, "*", true, 24);
     }
     let i = make(&mut l, "aigpu", false, false);
     for d in ["%APPDATA%\\NVIDIA\\ComputeCache", "%USERPROFILE%\\.nv\\ComputeCache", "%USERPROFILE%\\.triton\\cache"] {
@@ -472,7 +536,13 @@ fn broad(mask: &Mask) -> bool {
     matches!(mask, Mask::Any | Mask::General(_))
 }
 
-fn plans(t: &CleanTarget, fenced: bool) -> Vec<Plan> {
+fn temp_named(dir: &str, root: &Path) -> bool {
+    let var = dir.get(..6).is_some_and(|p| p.eq_ignore_ascii_case("%TEMP%")) || dir.get(..5).is_some_and(|p| p.eq_ignore_ascii_case("%TMP%"));
+    let named = |p: &Path| p.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Temp") || n.eq_ignore_ascii_case("Tmp"));
+    !var || named(root) || root.parent().is_some_and(named)
+}
+
+fn plans(t: &CleanTarget, fenced: bool) -> (Vec<Plan>, Vec<PathBuf>) {
     let admin = sys::is_admin();
     let own = if fenced { data::own_dirs().to_vec() } else { Vec::new() };
     let mut groups: Vec<(&str, bool, u64, Vec<Mask>)> = Vec::new();
@@ -489,8 +559,13 @@ fn plans(t: &CleanTarget, fenced: bool) -> Vec<Plan> {
         }
     }
     let mut out = Vec::new();
+    let mut refused = Vec::new();
     for (dir, recurse, age, masks) in groups {
         for root in fsx::expand_dirs(dir) {
+            if !fsx::local_drive_path(&root.to_string_lossy()) || !temp_named(dir, &root) {
+                continue;
+            }
+            let pin = if fenced { fsx::PinnedDir::open(&root).ok() } else { None };
             if has_reparse_ancestor(&root) || data::is_own(&root) {
                 continue;
             }
@@ -499,18 +574,22 @@ fn plans(t: &CleanTarget, fenced: bool) -> Vec<Plan> {
             if masks.is_empty() {
                 continue;
             }
-            let fence = match fenced {
-                true => match Fence::new(&root, &own) {
+            let fence = match (fenced, &pin) {
+                (false, _) => None,
+                (true, Some(p)) => match Fence::pinned(p, &own) {
                     Some(f) => Some(f),
                     None => continue,
                 },
-                false => None,
+                (true, None) => {
+                    refused.push(root);
+                    continue;
+                }
             };
             let any = masks.iter().any(Mask::is_any);
             out.push(Plan { root, masks, any, recurse, age, fence });
         }
     }
-    out
+    (out, refused)
 }
 
 #[derive(Default)]
@@ -539,8 +618,8 @@ pub fn scan(t: &mut CleanTarget) {
         return;
     }
     t.count += t.reg.iter().filter(|p| reg_path_ok(p)).map(|p| reg_entry_count(p)).sum::<u64>();
-    let plans = plans(t, false);
-    let (tallies, _) = walk(&plans, false, |p, _, m, acc: &mut Tally| {
+    let (plans, _) = plans(t, false);
+    let (tallies, _) = walk(&plans, false, &AtomicBool::new(false), |p, _, m, acc: &mut Tally| {
         if p.age > 0 && fsx::too_new(fsx::newest(m), p.age) {
             return;
         }
@@ -610,12 +689,16 @@ fn ollama_names(root: &Path) -> std::collections::HashMap<String, String> {
 }
 
 pub fn details(t: &CleanTarget) -> Vec<Detail> {
+    details_until(t, &AtomicBool::new(false))
+}
+
+pub fn details_until(t: &CleanTarget, stop: &AtomicBool) -> Vec<Detail> {
     if t.recycle {
         return vec![Detail { name: "Recycle Bin".to_string(), place: String::new(), bytes: t.bytes, count: t.count, path: "shell:RecycleBinFolder".to_string() }];
     }
-    let plans = plans(t, false);
+    let (plans, _) = plans(t, false);
     let depth = if t.id == "aimodels" { 2 } else { 1 };
-    let (parts, _) = walk(&plans, false, |p, e, m, acc: &mut Groups| {
+    let (parts, _) = walk(&plans, false, stop, |p, e, m, acc: &mut Groups| {
         if p.age > 0 && fsx::too_new(fsx::newest(m), p.age) {
             return;
         }
@@ -699,8 +782,10 @@ pub fn clean(t: &mut CleanTarget) {
         t.failed += failed;
     }
     data::ensure_root();
-    let plans = plans(t, true);
-    let (sweeps, dirs) = walk(&plans, true, |p, e, m, acc: &mut Sweep| {
+    let (plans, refused) = plans(t, true);
+    t.failed += refused.len() as u64;
+    t.fail_samples.extend(refused.iter().take(8).map(|r| r.display().to_string()));
+    let (sweeps, dirs) = walk(&plans, true, &AtomicBool::new(false), |p, e, m, acc: &mut Sweep| {
         let Some(fence) = &p.fence else { return };
         if p.age > 0 && fsx::too_new(fsx::newest(m), p.age) {
             return;
@@ -751,7 +836,10 @@ fn guarded_roots() -> &'static [String] {
     ROOTS.get_or_init(|| {
         let mut out = Vec::new();
         for name in ["WINDIR", "SystemRoot", "USERPROFILE", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData", "LOCALAPPDATA", "APPDATA", "PUBLIC"] {
-            if let Ok(value) = std::env::var(name) {
+            for value in [std::env::var(name).ok(), super::winenv::var(name)].into_iter().flatten() {
+                if !fsx::local_drive_path(&value) {
+                    continue;
+                }
                 let p = Path::new(&value);
                 out.extend(fsx::norm_key(p));
                 out.extend(fsx::canonical_key(p));
@@ -767,7 +855,7 @@ fn personal_dirs() -> &'static [String] {
     static DIRS: OnceLock<Vec<String>> = OnceLock::new();
     DIRS.get_or_init(|| {
         let mut paths: Vec<PathBuf> = Vec::new();
-        if let Ok(profile) = std::env::var("USERPROFILE") {
+        for profile in [std::env::var("USERPROFILE").ok(), super::winenv::var("USERPROFILE")].into_iter().flatten() {
             for n in ["Desktop", "Documents", "Downloads", "Pictures", "Music", "Videos", "OneDrive", "Favorites", "Contacts", "Links", "Saved Games", "Searches", "3D Objects"] {
                 paths.push(Path::new(&profile).join(n));
             }
@@ -785,23 +873,32 @@ fn personal_dirs() -> &'static [String] {
                 }
             }
         }
-        let mut out: Vec<String> = paths.iter().flat_map(|p| [fsx::norm_key(p), fsx::canonical_key(p)]).flatten().filter(|k| k.split('\\').filter(|s| !s.is_empty()).count() >= 2).collect();
+        let mut out: Vec<String> = paths.iter().filter(|p| p.is_absolute() && fsx::local_drive_path(&p.to_string_lossy())).flat_map(|p| [fsx::norm_key(p), fsx::canonical_key(p)]).flatten().filter(|k| k.split('\\').filter(|s| !s.is_empty()).count() >= 2).collect();
         out.sort();
         out.dedup();
         out
     })
 }
 
+fn deep_enough(key: &str) -> bool {
+    let parts: Vec<&str> = key.split('\\').filter(|s| !s.is_empty()).collect();
+    parts.len() >= 3 || (parts.len() == 2 && (parts[1].eq_ignore_ascii_case("temp") || parts[1].eq_ignore_ascii_case("tmp")))
+}
+
 pub fn is_safe(dir: &Path, mask: &str) -> bool {
     if !broad(&Mask::new(mask)) {
         return true;
     }
+    if !dir.is_absolute() || !fsx::local_drive_path(&dir.to_string_lossy()) {
+        return false;
+    }
     let (Some(key), Some(canon)) = (fsx::norm_key(dir), fsx::canonical_key(dir)) else { return false };
     [key, canon].iter().all(|k| {
         !k.starts_with("\\\\")
-            && k.split('\\').filter(|s| !s.is_empty()).count() >= 3
+            && deep_enough(k)
             && !guarded_roots().contains(k)
             && !personal_dirs().iter().any(|p| p == k || fsx::key_within(k, p))
+            && !super::winenv::program_dirs().iter().any(|p| fsx::norm_key(p).is_some_and(|pk| k.as_str() == pk.as_str() || fsx::key_within(k.as_str(), pk.as_str())))
     })
 }
 
@@ -818,6 +915,7 @@ struct Queue {
 struct Walk<'a, A, F> {
     plans: &'a [Plan],
     visit: &'a F,
+    stop: &'a AtomicBool,
     queue: Mutex<Queue>,
     ready: Condvar,
     results: Mutex<Vec<A>>,
@@ -837,7 +935,7 @@ fn reserve_walker() -> Option<Slot> {
     WALKERS.try_update(Ordering::AcqRel, Ordering::Acquire, |n| (n < cap).then_some(n + 1)).ok().map(|_| Slot)
 }
 
-fn walk<A, F>(plans: &[Plan], keep_dirs: bool, visit: F) -> (Vec<A>, Vec<(usize, PathBuf)>)
+fn walk<A, F>(plans: &[Plan], keep_dirs: bool, stop: &AtomicBool, visit: F) -> (Vec<A>, Vec<(usize, PathBuf)>)
 where
     A: Default + Send,
     F: Fn(&Plan, &fs::DirEntry, &fs::Metadata, &mut A) + Sync,
@@ -846,6 +944,7 @@ where
     let w = Walk {
         plans,
         visit: &visit,
+        stop,
         queue: Mutex::new(Queue { jobs, busy: 0, idle: 0 }),
         ready: Condvar::new(),
         results: Mutex::new(Vec::new()),
@@ -864,7 +963,7 @@ where
     let mut sub: Vec<PathBuf> = Vec::new();
     loop {
         let (plan, dir) = {
-            let mut q = w.queue.lock().unwrap();
+            let mut q = w.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             loop {
                 if let Some(job) = q.jobs.pop() {
                     q.busy += 1;
@@ -873,7 +972,7 @@ where
                 if q.busy == 0 {
                     drop(q);
                     w.ready.notify_all();
-                    w.results.lock().unwrap().push(acc);
+                    w.results.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(acc);
                     return;
                 }
                 q.idle += 1;
@@ -881,12 +980,14 @@ where
                 q.idle -= 1;
             }
         };
-        list(&w.plans[plan], &dir, &mut sub, &mut acc, w.visit);
+        if !w.stop.load(Ordering::Relaxed) {
+            list(&w.plans[plan], &dir, &mut sub, &mut acc, w.visit);
+        }
         let grow = {
-            let mut q = w.queue.lock().unwrap();
+            let mut q = w.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             q.busy -= 1;
             if let Some(d) = &w.dirs {
-                d.lock().unwrap().extend(sub.iter().map(|x| (plan, x.clone())));
+                d.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(sub.iter().map(|x| (plan, x.clone())));
             }
             let added = !sub.is_empty();
             q.jobs.extend(sub.drain(..).map(|d| (plan, d)));

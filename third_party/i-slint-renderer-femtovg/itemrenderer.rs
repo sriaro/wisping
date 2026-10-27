@@ -39,6 +39,25 @@ pub(super) type FemtovgBoxShadowCache<R> = BoxShadowCache<ItemGraphicsCacheEntry
 pub use femtovg::Canvas;
 pub type CanvasRc<R> = Rc<RefCell<Canvas<R>>>;
 
+fn pixmap_bytes(width: u32, height: u32, data: &[u8]) -> Option<&[u8]> {
+    let required = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    if width == 0 || height == 0 { return None; }
+    data.get(..required)
+}
+
+#[cfg(test)]
+mod security_tests {
+    #[test]
+    fn security_cached_pixmap_rejects_zero_short_and_overflow() {
+        let pixels = [0; 20];
+        assert!(super::pixmap_bytes(0, 1, &pixels).is_none());
+        assert!(super::pixmap_bytes(1, 0, &pixels).is_none());
+        assert!(super::pixmap_bytes(3, 2, &pixels).is_none());
+        assert!(super::pixmap_bytes(u32::MAX, u32::MAX, &pixels).is_none());
+        assert_eq!(super::pixmap_bytes(2, 2, &pixels).unwrap().len(), 16);
+    }
+}
+
 pub enum ItemGraphicsCacheEntry<R: femtovg::Renderer + TextureImporter> {
     Texture(Rc<Texture<R>>),
     ColorizedImage {
@@ -707,6 +726,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         let cache_entry = self.graphics_cache.get_or_update_cache_entry(item_rc, || {
             let mut cached_image = None;
             update_fn(&mut |width: u32, height: u32, data: &[u8]| {
+                let Some(data) = pixmap_bytes(width, height, data) else { return };
                 use rgb::FromSlice;
                 let img = imgref::Img::new(data.as_rgba(), width as usize, height as usize);
                 if let Ok(image_id) =

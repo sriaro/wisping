@@ -1,8 +1,13 @@
+use std::sync::Mutex;
+
 use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives};
 use windows::core::PCWSTR;
 
 const DRIVE_FIXED: u32 = 3;
 
+static CACHE: Mutex<Vec<Drive>> = Mutex::new(Vec::new());
+
+#[derive(Clone)]
 pub struct Drive {
     pub name: String,
     pub total: u64,
@@ -13,6 +18,16 @@ impl Drive {
     pub fn used_fraction(&self) -> f32 {
         if self.total == 0 { 0.0 } else { (self.total - self.free.min(self.total)) as f32 / self.total as f32 }
     }
+}
+
+pub fn cached() -> Vec<Drive> {
+    CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+}
+
+pub fn refresh() -> Vec<Drive> {
+    let list = fixed();
+    *CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = list.clone();
+    list
 }
 
 pub fn fixed() -> Vec<Drive> {

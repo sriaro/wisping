@@ -71,6 +71,9 @@ pub fn classify(e: &StartupEntry) -> (Role, Advice) {
     if e.kind == StartupKind::Context {
         return (Role::Menu, Advice::Safe);
     }
+    if e.kind == StartupKind::Advanced {
+        return (Role::App, Advice::Caution);
+    }
     if let Some(hit) = super::known::lookup(e) {
         return hit;
     }

@@ -1,28 +1,41 @@
 use std::ffi::{OsStr, c_void};
 use std::fs::{self, File, OpenOptions};
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::AsRawHandle;
 use std::path::{Component, Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
     FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
     FILE_DISPOSITION_INFO_EX_FLAGS, FILE_NAME_NORMALIZED, FILE_NAME_OPENED, FileDispositionInfo, FileDispositionInfoEx, GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW,
-    SetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, CopyFileW, GetDriveTypeW, GetFileInformationByHandle, SetFileInformationByHandle,
 };
+use windows::core::PCWSTR;
 
 const REPARSE_POINT: u32 = 0x400;
 const READ_ONLY: u32 = 0x1;
 const DELETE: u32 = 0x0001_0000;
 const READ_ATTRIBUTES: u32 = 0x80;
+const LIST_DIRECTORY: u32 = 1;
+const SHARE_READ: u32 = 1;
 const WRITE_ATTRIBUTES: u32 = 0x100;
+const WRITE_DAC: u32 = 0x0004_0000;
+const READ_CONTROL: u32 = 0x0002_0000;
 const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const SHARE_ALL: u32 = 7;
 const SEP: u16 = b'\\' as u16;
+
+#[cfg(test)]
+#[path = "fsx/security_tests.rs"]
+pub(crate) mod security_tests;
+
+#[path = "fsx/copy_remove.rs"]
+mod copy_remove;
 
 pub fn is_reparse(path: &Path) -> bool {
     match fs::symlink_metadata(path) {
@@ -35,7 +48,15 @@ pub fn attrs_reparse(attrs: u32) -> bool {
     attrs & REPARSE_POINT != 0
 }
 
+pub fn attrs_cloud(attrs: u32) -> bool {
+    attrs & (0x0040_0000 | 0x0004_0000 | 0x1000) != 0
+}
+
 pub fn expand_env(text: &str) -> String {
+    expand_with(text, super::winenv::var)
+}
+
+pub fn expand_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find('%') {
@@ -47,8 +68,8 @@ pub fn expand_env(text: &str) -> String {
             return out;
         };
         let name = &after[..end];
-        match std::env::var(name) {
-            Ok(value) if !name.is_empty() => out.push_str(&value),
+        match lookup(name) {
+            Some(value) if !name.is_empty() => out.push_str(&value),
             _ => {
                 out.push('%');
                 out.push_str(name);
@@ -63,7 +84,7 @@ pub fn expand_env(text: &str) -> String {
 
 pub fn windir() -> &'static str {
     static WINDIR: OnceLock<String> = OnceLock::new();
-    WINDIR.get_or_init(|| std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string()).to_lowercase().trim_end_matches('\\').to_string())
+    WINDIR.get_or_init(|| super::winenv::windows_dir().to_string_lossy().to_lowercase().trim_end_matches('\\').to_string())
 }
 
 fn clean_lower(path: &str) -> String {
@@ -181,6 +202,15 @@ fn glob(n: &[char], m: &[char]) -> bool {
 
 pub fn has_wildcard(text: &str) -> bool {
     text.contains(['*', '?'])
+}
+
+pub fn local_drive_path(path: &str) -> bool {
+    let b = path.as_bytes();
+    if !(b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'\\' | b'/')) {
+        return false;
+    }
+    let root = [b[0] as u16, b':' as u16, b'\\' as u16, 0];
+    matches!(unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) }, 2 | 3 | 5 | 6)
 }
 
 pub fn absolute(path: &Path) -> Option<PathBuf> {
@@ -315,6 +345,289 @@ fn same_or_within(path: &[u16], base: &[u16]) -> bool {
     (path.len() == base.len() && same_prefix(path, base)) || within(path, base)
 }
 
+pub struct PinnedDir {
+    path: PathBuf,
+    pins: Vec<Arc<File>>,
+}
+
+fn refused_path() -> io::Error {
+    io::Error::other("A folder or file changed, or is a link. Choose an ordinary folder and try again.")
+}
+
+fn child_name(name: &OsStr) -> io::Result<()> {
+    let mut parts = Path::new(name).components();
+    if !matches!(parts.next(), Some(Component::Normal(_))) || parts.next().is_some() || name.as_encoded_bytes().contains(&b':') {
+        return Err(refused_path());
+    }
+    Ok(())
+}
+
+fn handle_is_child(file: &File, parent: &File) -> bool {
+    let (Some(path), Some(base)) = (final_path(file), final_path(parent)) else { return false };
+    path.iter().rposition(|&c| c == SEP).is_some_and(|end| path[..end].len() == base.len() && same_prefix(&path[..end], &base))
+}
+
+impl PinnedDir {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        Self::walk(path, false, false)
+    }
+
+    pub fn create(path: &Path) -> io::Result<Self> {
+        Self::walk(path, true, false)
+    }
+
+    pub fn create_private(path: &Path) -> io::Result<Self> {
+        Self::walk(path, true, true)
+    }
+
+    fn walk(path: &Path, create: bool, private: bool) -> io::Result<Self> {
+        if !path.is_absolute() {
+            return Err(refused_path());
+        }
+        let mut current = PathBuf::new();
+        let mut dir = None;
+        for part in path.components() {
+            match part {
+                Component::Prefix(p) => {
+                    use std::path::Prefix;
+                    if !matches!(p.kind(), Prefix::Disk(_) | Prefix::VerbatimDisk(_) | Prefix::UNC(..) | Prefix::VerbatimUNC(..)) {
+                        return Err(refused_path());
+                    }
+                    current.push(p.as_os_str());
+                }
+                Component::RootDir => {
+                    current.push("\\");
+                    let file = Self::pin(&current, None, READ_ATTRIBUTES)?;
+                    dir = Some(Self { path: current.clone(), pins: vec![Arc::new(file)] });
+                }
+                Component::Normal(name) => dir = Some(dir.ok_or_else(refused_path)?.child_inner(name, create, READ_ATTRIBUTES, private)?),
+                _ => return Err(refused_path()),
+            }
+        }
+        dir.ok_or_else(refused_path)
+    }
+
+    fn pin(path: &Path, parent: Option<&File>, access: u32) -> io::Result<File> {
+        let file = OpenOptions::new().access_mode(access | LIST_DIRECTORY).share_mode(SHARE_READ).custom_flags(OPEN_REPARSE_POINT | BACKUP_SEMANTICS).open(path)
+            .map_err(|e| io::Error::new(e.kind(), format!("{}: {}", path.display(), e)))?;
+        let meta = file.metadata()?;
+        if !meta.is_dir() || attrs_reparse(meta.file_attributes()) || parent.is_some_and(|p| !handle_is_child(&file, p)) {
+            return Err(refused_path());
+        }
+        Ok(file)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn make_private(&self) -> io::Result<()> {
+        use windows::Win32::Foundation::{CloseHandle, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT, SetSecurityInfo};
+        use windows::Win32::Security::{ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+        use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, ReOpenFile};
+        let mut sids = vec![super::sys::user_sid()?];
+        if super::sys::is_admin()
+            && let Some(shell) = super::sys::shell_user_sid()
+            && !sids.contains(&shell) {
+                sids.push(shell);
+        }
+        let users: String = sids.iter().map(|sid| format!("(A;OICI;FA;;;{})", sid)).collect();
+        let text: Vec<u16> = format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA){}", users).encode_utf16().chain([0]).collect();
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(PCWSTR(text.as_ptr()), 1, &mut descriptor, None) }.map_err(io::Error::other)?;
+        let mut present = windows::core::BOOL(0);
+        let mut defaulted = windows::core::BOOL(0);
+        let mut acl: *mut ACL = std::ptr::null_mut();
+        let result = unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) }.map_err(io::Error::other).and_then(|_| {
+            let handle = unsafe { ReOpenFile(HANDLE(self.handle().as_raw_handle()), WRITE_DAC | READ_ATTRIBUTES, FILE_SHARE_MODE(SHARE_READ), FILE_FLAGS_AND_ATTRIBUTES(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)) }
+                .map_err(io::Error::other)?;
+            let status = unsafe { SetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, None, None, Some(acl), None) };
+            let _ = unsafe { CloseHandle(handle) };
+            status.ok().map_err(io::Error::other)
+        });
+        unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+        result
+    }
+
+    pub fn is_private(&self) -> bool {
+        use windows::Win32::Foundation::{CloseHandle, HLOCAL, LocalFree};
+        use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+        use windows::Win32::Security::{DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED};
+        use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, ReOpenFile};
+        let Ok(handle) = (unsafe { ReOpenFile(HANDLE(self.handle().as_raw_handle()), READ_CONTROL | READ_ATTRIBUTES, FILE_SHARE_MODE(SHARE_READ), FILE_FLAGS_AND_ATTRIBUTES(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)) }) else {
+            return false;
+        };
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        let status = unsafe { GetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, None, None, None, None, Some(&mut descriptor)) };
+        let _ = unsafe { CloseHandle(handle) };
+        if status.is_err() || descriptor.0.is_null() {
+            return false;
+        }
+        let mut control = 0;
+        let mut revision = 0;
+        let protected = unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }.is_ok() && control & SE_DACL_PROTECTED.0 != 0;
+        unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
+        protected
+    }
+
+    fn handle(&self) -> &File {
+        self.pins.last().unwrap()
+    }
+
+    pub fn child(&self, name: &OsStr, create: bool) -> io::Result<Self> {
+        self.child_with_access(name, create, READ_ATTRIBUTES)
+    }
+
+    pub fn private_child(&self, name: &OsStr) -> io::Result<Self> {
+        self.child_inner(name, true, READ_ATTRIBUTES, true)
+    }
+
+    pub fn deletable_child(&self, name: &OsStr) -> io::Result<Self> {
+        self.child_with_access(name, false, READ_ATTRIBUTES | DELETE)
+    }
+
+    fn child_with_access(&self, name: &OsStr, create: bool, access: u32) -> io::Result<Self> {
+        self.child_inner(name, create, access, false)
+    }
+
+    fn child_inner(&self, name: &OsStr, create: bool, access: u32, private: bool) -> io::Result<Self> {
+        child_name(name)?;
+        let path = self.path.join(name);
+        let made = create && match fs::create_dir(&path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
+            Err(e) => return Err(e),
+        };
+        let file = Self::pin(&path, Some(self.handle()), access)?;
+        let mut pins = self.pins.clone();
+        pins.push(Arc::new(file));
+        let dir = Self { path, pins };
+        if made && private {
+            let _ = dir.make_private();
+        }
+        Ok(dir)
+    }
+
+    pub fn read_file(&self, name: &OsStr) -> io::Result<File> {
+        child_name(name)?;
+        let file = OpenOptions::new().read(true).share_mode(SHARE_READ).custom_flags(OPEN_REPARSE_POINT).open(self.path.join(name))?;
+        self.plain_child(&file)?;
+        Ok(file)
+    }
+
+    pub fn has_plain_entry(&self, name: &OsStr) -> io::Result<bool> {
+        child_name(name)?;
+        let opened = OpenOptions::new().access_mode(READ_ATTRIBUTES).share_mode(SHARE_READ).custom_flags(OPEN_REPARSE_POINT | BACKUP_SEMANTICS).open(self.path.join(name));
+        let file = match opened {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        let meta = file.metadata()?;
+        if attrs_reparse(meta.file_attributes()) || !(meta.is_file() || meta.is_dir()) || !handle_is_child(&file, self.handle()) {
+            return Err(refused_path());
+        }
+        Ok(true)
+    }
+
+    pub fn create_file(&self, name: &OsStr) -> io::Result<File> {
+        child_name(name)?;
+        let file = OpenOptions::new().write(true).create_new(true).share_mode(0).custom_flags(OPEN_REPARSE_POINT).open(self.path.join(name))?;
+        self.plain_child(&file)?;
+        Ok(file)
+    }
+
+    pub fn update_file(&self, name: &OsStr, update: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+        static WRITERS: Mutex<()> = Mutex::new(());
+        let _writer = WRITERS.lock().map_err(|_| io::Error::other("A data-file write was interrupted."))?;
+        child_name(name)?;
+        let mut file = OpenOptions::new().read(true).write(true).create(true).share_mode(SHARE_READ)
+            .custom_flags(OPEN_REPARSE_POINT).open(self.path.join(name))?;
+        self.plain_child(&file)?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
+            .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xffff))?;
+        if info.nNumberOfLinks != 1 {
+            return Err(refused_path());
+        }
+        update(&mut file)?;
+        file.sync_all()
+    }
+
+    pub fn write_file(&self, name: &OsStr, contents: &[u8]) -> io::Result<()> {
+        self.update_file(name, |file| {
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(contents)
+        })
+    }
+
+    pub fn append_file(&self, name: &OsStr, contents: &[u8]) -> io::Result<()> {
+        self.update_file(name, |file| {
+            file.seek(SeekFrom::End(0))?;
+            file.write_all(contents)
+        })
+    }
+
+    pub fn append_lines(&self, name: &OsStr, line: &str, keep: usize) -> io::Result<()> {
+        self.update_file(name, |file| {
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)?;
+            let mut text = String::from_utf8_lossy(&bytes).into_owned();
+            text.push_str(line);
+            let lines: Vec<&str> = text.lines().collect();
+            let text = if lines.len() > keep { lines[lines.len() - keep..].join("\n") + "\n" } else { text };
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(text.as_bytes())
+        })
+    }
+
+    pub fn copy_file_to(&self, name: &OsStr, target: &Self) -> io::Result<()> {
+        let _source = self.read_file(name)?;
+        let from: Vec<u16> = self.path.join(name).as_os_str().encode_wide().chain([0]).collect();
+        let to: Vec<u16> = target.path.join(name).as_os_str().encode_wide().chain([0]).collect();
+        unsafe { CopyFileW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), true) }
+            .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xffff))
+    }
+
+    fn plain_child(&self, file: &File) -> io::Result<()> {
+        let meta = file.metadata()?;
+        if !meta.is_file() || attrs_reparse(meta.file_attributes()) || !handle_is_child(file, self.handle()) {
+            return Err(refused_path());
+        }
+        Ok(())
+    }
+
+    pub fn remove_file(&self, name: &OsStr) -> io::Result<()> {
+        child_name(name)?;
+        let file = OpenOptions::new().access_mode(DELETE | READ_ATTRIBUTES).share_mode(SHARE_READ).custom_flags(OPEN_REPARSE_POINT).open(self.path.join(name))?;
+        self.plain_child(&file)?;
+        if dispose(&file, false) { Ok(()) } else { Err(io::Error::last_os_error()) }
+    }
+
+    pub fn backup_and_remove_file(&self, name: &OsStr, target: &Self) -> io::Result<()> {
+        copy_remove::run(self, name, target, || {})
+    }
+
+    pub fn remove(self) -> io::Result<()> {
+        if dispose(self.handle(), false) { Ok(()) } else { Err(io::Error::last_os_error()) }
+    }
+}
+
+pub fn write_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(refused_path)?;
+    let name = path.file_name().ok_or_else(refused_path)?;
+    PinnedDir::create(parent)?.write_file(name, contents)
+}
+
+pub fn append_file(path: &Path, contents: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(refused_path)?;
+    let name = path.file_name().ok_or_else(refused_path)?;
+    PinnedDir::create(parent)?.append_file(name, contents)
+}
+
 pub struct Fence {
     root: Vec<u16>,
     own: Vec<Vec<u16>>,
@@ -322,11 +635,11 @@ pub struct Fence {
 
 impl Fence {
     pub fn new(root: &Path, own: &[PathBuf]) -> Option<Fence> {
-        let file = open_nofollow(root, READ_ATTRIBUTES).ok()?;
-        if attrs_reparse(file.metadata().ok()?.file_attributes()) {
-            return None;
-        }
-        let root = final_path(&file)?;
+        Self::pinned(&PinnedDir::open(root).ok()?, own)
+    }
+
+    pub fn pinned(dir: &PinnedDir, own: &[PathBuf]) -> Option<Fence> {
+        let root = final_path(dir.handle())?;
         let mut guarded = Vec::new();
         for p in own {
             for flags in [OPEN_REPARSE_POINT | BACKUP_SEMANTICS, BACKUP_SEMANTICS] {

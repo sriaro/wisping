@@ -71,6 +71,7 @@ fn load(c: &Ctx) {
     st.set_loading(true);
     let weak = c.weak.clone();
     std::thread::spawn(move || {
+        let _reset = crate::app::panic_reset(&weak, |ui| ui.global::<UninstallState>().set_loading(false));
         let list = programs::list();
         let _ = weak.upgrade_in_event_loop(move |ui| {
             crate::winui::trim_soon();
@@ -124,7 +125,7 @@ pub fn install(c: &Ctx) {
         if let Some(p) = program_at(idx) {
             let b = p.location.as_bytes();
             if b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' &&std::path::Path::new(&p.location).is_dir() {
-                let _ = std::process::Command::new(crate::engine::sys::system_tool("explorer.exe")).arg(&p.location).spawn();
+                let _ = crate::engine::sys::launch("explorer.exe", &crate::engine::sys::quoted(std::path::Path::new(&p.location)));
             }
         }
     });

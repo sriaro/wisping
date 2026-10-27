@@ -804,6 +804,9 @@ impl Renderer for OpenGl {
     ) {
         self.current_program = 0;
         self.main_program().bind();
+        // Image reallocation may have invalidated the currently selected framebuffer.
+        self.set_target(images, self.current_render_target);
+        self.main_program().set_view(self.view);
 
         unsafe {
             self.context.enable(glow::CULL_FACE);

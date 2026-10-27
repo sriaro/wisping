@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
-use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -10,6 +10,7 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, FILE_FLAG_SEQUENTIAL_SCAN, GetFileInformationByHandle};
 
 use super::{Kind, Tree};
+use crate::engine::fsx;
 
 const MIN_SIZE: u64 = 1024 * 1024;
 const EDGE: usize = 64 * 1024;
@@ -26,19 +27,23 @@ impl Group {
     }
 }
 
-fn file_id(f: &File) -> Option<u64> {
+fn file_id(f: &File) -> Option<u128> {
     let mut info = BY_HANDLE_FILE_INFORMATION::default();
     unsafe { GetFileInformationByHandle(HANDLE(f.as_raw_handle()), &mut info).ok()? };
-    Some(((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64)
+    Some(((info.dwVolumeSerialNumber as u128) << 64) | ((info.nFileIndexHigh as u128) << 32) | info.nFileIndexLow as u128)
 }
 
 fn open(path: &std::path::Path) -> Option<File> {
+    let md = std::fs::symlink_metadata(path).ok()?;
+    if !md.is_file() || fsx::attrs_cloud(md.file_attributes()) || fsx::attrs_reparse(md.file_attributes()) {
+        return None;
+    }
     OpenOptions::new().read(true).share_mode(7).custom_flags(FILE_FLAG_SEQUENTIAL_SCAN.0).open(path).ok()
 }
 
 type Digest = [u8; 32];
 
-fn partial_hash(path: &std::path::Path, size: u64, buf: &mut [u8]) -> Option<(Digest, u64)> {
+fn partial_hash(path: &std::path::Path, size: u64, buf: &mut [u8]) -> Option<(Digest, u128)> {
     let mut f = open(path)?;
     let id = file_id(&f)?;
     let edge = &mut buf[..EDGE];
@@ -67,9 +72,9 @@ fn full_hash(path: &std::path::Path, cancel: &AtomicBool, buf: &mut [u8]) -> Opt
     }
 }
 
-fn split(tree: &Tree, ids: &[u32], mut hash: impl FnMut(&std::path::Path) -> Option<(Digest, u64)>) -> Vec<Vec<u32>> {
+fn split(tree: &Tree, ids: &[u32], mut hash: impl FnMut(&std::path::Path) -> Option<(Digest, u128)>) -> Vec<Vec<u32>> {
     let mut map: HashMap<Digest, Vec<u32>> = HashMap::new();
-    let mut linked: HashSet<u64> = HashSet::new();
+    let mut linked: HashSet<u128> = HashSet::new();
     for &id in ids {
         if let Some((h, file)) = hash(&tree.path_of(id))
             && (file == 0 || linked.insert(file)) {
@@ -104,7 +109,7 @@ pub fn find(tree: &Tree, cancel: &AtomicBool) -> Vec<Group> {
                     let (size, ids) = &candidates[k];
                     for part in split(tree, ids, |p| partial_hash(p, *size, &mut buf)) {
                         for same in split(tree, &part, |p| full_hash(p, cancel, &mut buf).map(|h| (h, 0))) {
-                            out.lock().unwrap().push(Group { size: *size, members: same });
+                            out.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(Group { size: *size, members: same });
                         }
                     }
                 }

@@ -6,10 +6,13 @@ fn main() {
     let mut res = winresource::WindowsResource::new();
     res.set_icon("assets/app.ico");
     res.set_manifest_file("assets/app.manifest");
-    res.set("ProductName", "Wisp");
-    res.set("FileDescription", "Wisp");
-    res.set("OriginalFilename", "Wisp.exe");
+    res.set("ProductName", "Wisping");
+    res.set("FileDescription", "Wisping");
+    res.set("OriginalFilename", "Wisping.exe");
     res.set("FileVersion", "1.0.0.0");
     res.set("ProductVersion", "1.0.0.0");
     res.compile().unwrap();
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/DEPENDENTLOADFLAG:0x800");
+    }
 }

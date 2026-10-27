@@ -38,6 +38,8 @@ pub enum ErrorKind {
     ImageUpdateOutOfBounds,
     /// An error occurred while updating an image with a different format.
     ImageUpdateWithDifferentFormat,
+    /// The source dimensions, stride, or pixel buffer do not describe a complete image.
+    InvalidImageData,
     /// The specified image format is not supported.
     UnsupportedImageFormat,
     /// The requested operation is not supported (for example screenshot by wgpu renderer).

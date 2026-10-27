@@ -21,6 +21,6 @@ pub mod settings;
 pub mod shellmenu;
 pub mod startup;
 pub mod tasks;
-pub mod trayicons;
 pub mod tools;
 pub mod sys;
+pub mod winenv;

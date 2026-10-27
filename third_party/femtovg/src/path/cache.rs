@@ -879,41 +879,35 @@ impl PathCache {
             return None;
         }
 
-        let vertices = &self.contours[0].fill;
-        if vertices.len() != 6 {
+        let points = &self.points[self.contours[0].point_range.clone()];
+        if points.len() != 4 || points.iter().any(|p| !p.pos.x.is_finite() || !p.pos.y.is_finite()) {
             return None;
         }
-
-        let maybe_t1_top_left = vertices[0];
-        let maybe_t1_bottom_left = vertices[1];
-        let maybe_t1_bottom_right = vertices[2];
-        let maybe_t2_top_left = vertices[3];
-        let maybe_t2_bottom_right = vertices[4];
-        let maybe_t2_top_right = vertices[5];
-
-        if maybe_t1_top_left == maybe_t2_top_left
-            && maybe_t1_bottom_right == maybe_t2_bottom_right
-            && maybe_t1_top_left.x == maybe_t1_bottom_left.x
-            && maybe_t1_top_left.y == maybe_t2_top_right.y
-            && maybe_t1_bottom_right.x == maybe_t2_top_right.x
-            && maybe_t2_bottom_right.y == maybe_t1_bottom_left.y
+        let [p0, p1, p2, p3] = [points[0].pos, points[1].pos, points[2].pos, points[3].pos];
+        let width = (p2.x - p0.x).abs();
+        let height = (p2.y - p0.y).abs();
+        if p0.x != p2.x
+            && p0.y != p2.y
+            && width.is_finite()
+            && height.is_finite()
+            && ((p0.x == p1.x && p1.y == p2.y && p2.x == p3.x && p3.y == p0.y)
+                || (p0.y == p1.y && p1.x == p2.x && p2.y == p3.y && p3.x == p0.x))
         {
-            Some(crate::Rect::new(
-                maybe_t1_top_left.x,
-                maybe_t1_top_left.y,
-                maybe_t2_top_right.x - maybe_t1_top_left.x,
-                maybe_t1_bottom_left.y - maybe_t1_top_left.y,
-            ))
+            Some(crate::Rect::new(p0.x.min(p2.x), p0.y.min(p2.y), width, height))
         } else {
             None
         }
     }
 }
 
+#[cfg(test)]
+#[path = "cache/security_tests.rs"]
+mod security_tests;
+
 fn curve_divisions(radius: f32, arc: f32, tol: f32) -> u32 {
     let da = (radius / (radius + tol)).acos() * 2.0;
 
-    ((arc / da).ceil() as u32).max(2)
+    ((arc / da).ceil() as u32).clamp(2, 1024)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1107,6 +1101,30 @@ mod tests {
 
     use super::*;
     use crate::Path;
+
+    #[test]
+    fn image_rect_detection_uses_contour_instead_of_fill_layout() {
+        for (x, y, w, h) in [(10.0, 20.0, 50.0, 40.0), (60.0, 60.0, -50.0, -40.0)] {
+            let mut path = Path::new();
+            path.rect(x, y, w, h);
+            let mut cache = PathCache::new(path.verbs(), &Transform2D::identity(), 0.25, 0.01);
+            cache.expand_fill(0.0, LineJoin::Miter, 2.4);
+            assert_eq!(cache.contours[0].fill.len(), 12);
+            let rect = cache.path_fill_is_rect().unwrap();
+            assert_eq!((rect.x, rect.y, rect.w, rect.h), (10.0, 20.0, 50.0, 40.0));
+        }
+        let mut path = Path::new();
+        path.move_to(0.0, 0.0);
+        path.line_to(10.0, 0.0);
+        path.line_to(11.0, 10.0);
+        path.line_to(1.0, 10.0);
+        path.close();
+        let cache = PathCache::new(path.verbs(), &Transform2D::identity(), 0.25, 0.01);
+        assert!(cache.path_fill_is_rect().is_none());
+        path.rect(20.0, 20.0, 10.0, 10.0);
+        let cache = PathCache::new(path.verbs(), &Transform2D::identity(), 0.25, 0.01);
+        assert!(cache.path_fill_is_rect().is_none());
+    }
 
     #[test]
     fn self_intersecting_polygon_is_concave() {

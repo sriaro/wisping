@@ -1,5 +1,5 @@
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,8 +15,8 @@ pub fn system_tool(program: &str) -> PathBuf {
     if program.contains(['\\', '/', ':']) {
         return PathBuf::from(program);
     }
-    let root = PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string()));
-    [root.join("System32"), root].into_iter().map(|d| d.join(program)).find(|p| p.is_file()).unwrap_or_else(|| PathBuf::from(program))
+    let system = super::winenv::system_dir();
+    [system, super::winenv::windows_dir()].into_iter().map(|d| d.join(program)).find(|p| p.is_file()).unwrap_or_else(|| system.join(program))
 }
 
 pub fn hidden(program: &str) -> Command {
@@ -51,30 +51,137 @@ pub fn command_failure(output: &[u8], code: Option<i32>) -> String {
     }
 }
 
-fn query_admin() -> bool {
+fn token_elevated(token: HANDLE) -> std::io::Result<bool> {
+    let mut elevation = TOKEN_ELEVATION::default();
+    let mut len = 0u32;
     unsafe {
-        let mut token = HANDLE::default();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
-            return false;
-        }
-        let mut elevation = TOKEN_ELEVATION::default();
-        let mut len = 0u32;
-        let ok = GetTokenInformation(
+        GetTokenInformation(
             token,
             TokenElevation,
             Some(&mut elevation as *mut _ as *mut _),
             std::mem::size_of::<TOKEN_ELEVATION>() as u32,
             &mut len,
         )
-        .is_ok();
+    }
+    .map_err(|_| std::io::Error::last_os_error())?;
+    Ok(elevation.TokenIsElevated != 0)
+}
+
+pub fn elevation() -> std::io::Result<bool> {
+    unsafe {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let result = token_elevated(token);
         let _ = CloseHandle(token);
-        ok && elevation.TokenIsElevated != 0
+        result
+    }
+}
+
+pub struct ShellToken(HANDLE);
+
+impl Drop for ShellToken {
+    fn drop(&mut self) {
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+pub fn shell_token() -> Option<ShellToken> {
+    use windows::Win32::Security::{DuplicateTokenEx, SecurityImpersonation, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TokenPrimary};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows::Win32::UI::WindowsAndMessaging::{GetShellWindow, GetWindowThreadProcessId};
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(GetShellWindow(), Some(&mut pid));
+        if pid == 0 {
+            return None;
+        }
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut token = HANDLE::default();
+        let opened = OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &mut token);
+        let _ = CloseHandle(process);
+        opened.ok()?;
+        let token = ShellToken(token);
+        if token_elevated(token.0).unwrap_or(true) {
+            return None;
+        }
+        let mut primary = HANDLE::default();
+        let access = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID;
+        DuplicateTokenEx(token.0, access, None, SecurityImpersonation, TokenPrimary, &mut primary).ok()?;
+        Some(ShellToken(primary))
+    }
+}
+
+pub fn quoted(path: &Path) -> String {
+    format!("\"{}\"", path.display())
+}
+
+pub fn spawn_with(token: &ShellToken, program: &Path, args: &str) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::System::Threading::{CREATE_PROCESS_LOGON_FLAGS, CreateProcessWithTokenW, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTUPINFOW};
+    use windows::core::{PCWSTR, PWSTR};
+    let app: Vec<u16> = program.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut line: Vec<u16> = format!("{} {}", quoted(program), args).encode_utf16().chain(Some(0)).collect();
+    let startup = STARTUPINFOW { cb: std::mem::size_of::<STARTUPINFOW>() as u32, ..Default::default() };
+    let mut info = PROCESS_INFORMATION::default();
+    unsafe {
+        CreateProcessWithTokenW(token.0, CREATE_PROCESS_LOGON_FLAGS(0), PCWSTR(app.as_ptr()), Some(PWSTR(line.as_mut_ptr())), PROCESS_CREATION_FLAGS(0), None, PCWSTR::null(), &startup, &mut info)
+            .map_err(|e| std::io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+        let _ = CloseHandle(info.hThread);
+        let _ = CloseHandle(info.hProcess);
+    }
+    Ok(())
+}
+
+pub fn launch(program: &str, args: &str) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    let exe = system_tool(program);
+    if !is_admin() {
+        return Command::new(exe).raw_arg(args).spawn().map(drop);
+    }
+    let token = shell_token().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::PermissionDenied, "the desktop shell is unavailable"))?;
+    spawn_with(&token, &exe, args)
+}
+
+pub fn user_sid() -> std::io::Result<String> {
+    let mut token = HANDLE::default();
+    unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.map_err(std::io::Error::other)?;
+    let sid = token_sid(token);
+    let _ = unsafe { CloseHandle(token) };
+    sid
+}
+
+pub fn shell_user_sid() -> Option<String> {
+    let token = shell_token()?;
+    token_sid(token.0).ok()
+}
+
+fn token_sid(token: HANDLE) -> std::io::Result<String> {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{TOKEN_USER, TokenUser};
+    unsafe {
+        let mut buf = [0u64; 64];
+        let mut len = 0u32;
+        GetTokenInformation(token, TokenUser, Some(buf.as_mut_ptr().cast()), std::mem::size_of_val(&buf) as u32, &mut len).map_err(std::io::Error::other)?;
+        let user = &*buf.as_ptr().cast::<TOKEN_USER>();
+        let mut text = windows::core::PWSTR::null();
+        ConvertSidToStringSidW(user.User.Sid, &mut text).map_err(std::io::Error::other)?;
+        let sid = text.to_string().map_err(std::io::Error::other);
+        let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+        sid
     }
 }
 
 pub fn is_admin() -> bool {
     static ADMIN: OnceLock<bool> = OnceLock::new();
-    *ADMIN.get_or_init(query_admin)
+    *ADMIN.get_or_init(|| elevation().unwrap_or(false))
+}
+
+pub fn shell_user_is_self() -> bool {
+    static SAME: OnceLock<bool> = OnceLock::new();
+    *SAME.get_or_init(|| !is_admin() || matches!((user_sid(), shell_user_sid()), (Ok(own), Some(shell)) if own == shell))
 }
 
 pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Option<R> + Sync) -> Vec<R> {

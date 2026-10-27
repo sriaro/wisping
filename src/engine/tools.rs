@@ -1,16 +1,12 @@
-use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
-use winreg::enums::*;
-
 use super::data;
 use super::regbackup::{self, Hive};
 use super::registry;
 use super::sys;
-use super::trayicons;
 
 const GAME_DVR: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\GameDVR";
 const GAME_STORE: &str = "System\\GameConfigStore";
@@ -46,12 +42,11 @@ pub struct ToolInfo {
     pub admin: bool,
 }
 
-pub const TOOLS: [ToolInfo; 7] = [
+pub const TOOLS: [ToolInfo; 6] = [
     ToolInfo { id: "gamebar", icon: "zap", tint: 2, toggle: true, admin: false },
     ToolInfo { id: "devmeta", icon: "shield", tint: 5, toggle: true, admin: true },
     ToolInfo { id: "telemetry", icon: "shield-alert", tint: 4, toggle: true, admin: true },
     ToolInfo { id: "wer", icon: "alert", tint: 6, toggle: true, admin: true },
-    ToolInfo { id: "nvtray", icon: "shield", tint: 5, toggle: true, admin: false },
     ToolInfo { id: "notify", icon: "alert", tint: 3, toggle: false, admin: false },
     ToolInfo { id: "tray", icon: "refresh", tint: 1, toggle: false, admin: false },
 ];
@@ -98,7 +93,7 @@ pub fn write_flags(pairs: &[(&str, &str)], on: bool) -> io::Result<()> {
         return Err(io::Error::other("refused"));
     }
     for (k, n) in pairs {
-        let (key, _) = Hive::User.root().create_subkey_with_flags(k, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)?;
+        let key = Hive::User.create(k)?;
         key.set_value(n, &(on as u32))?;
     }
     Ok(())
@@ -121,25 +116,37 @@ pub fn set_policy(hive: Hive, policy: &str, mirror: Option<&str>, name: &str, va
         return Err(io::Error::other("This needs administrator rights. Use \"Restart as admin\" in the sidebar."));
     }
     let keys: Vec<&str> = std::iter::once(policy).chain(mirror).collect();
-    let state: Vec<(bool, Option<u32>)> = keys.iter().map(|k| hive.open(k).map(|key| (regbackup::has_value(&key, name), regbackup::read_dword(&key, name))).unwrap_or((false, None))).collect();
+    let mut opened: Vec<Option<winreg::RegKey>> = keys.iter().map(|path| {
+        if on {
+            hive.create(path).map(Some)
+        } else {
+            match hive.open_delete(path) {
+                Ok(key) => Ok(Some(key)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+    }).collect::<io::Result<_>>()?;
+    let state: Vec<(bool, Option<u32>)> = opened.iter().map(|key| key.as_ref()
+        .map(|key| (regbackup::has_value(key, name), regbackup::read_dword(key, name)))
+        .unwrap_or((false, None))).collect();
     if state.iter().any(|s| s.0 && s.1.is_none()) {
         return Err(io::Error::other("unexpected value type"));
     }
     let ids: Vec<String> = keys.iter().map(|k| mark_id(hive, k, name)).collect();
-    let mut marks = read_marks();
+    let mut marks = read_marks(hive);
     let mark_of = |marks: &[(String, Option<u32>)], i: usize| marks.iter().find(|m| m.0 == ids[i]).map(|m| m.1);
     if on {
         let present: Vec<usize> = (0..keys.len()).filter(|&i| state[i].0).collect();
-        backup_values(hive, &keys, &present, name, new_backup)?;
+        backup_values(hive, &keys, &opened, &present, name, new_backup)?;
         for i in 0..keys.len() {
             if mark_of(&marks, i).is_none() {
                 marks.push((ids[i].clone(), state[i].1));
             }
         }
-        write_marks(&marks)?;
-        for k in &keys {
-            let (key, _) = hive.root().create_subkey_with_flags(k, KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)?;
-            key.set_value(name, &value)?;
+        write_marks(hive, &marks)?;
+        for key in &opened {
+            key.as_ref().ok_or_else(|| io::Error::other("key missing"))?.set_value(name, &value)?;
         }
         return Ok(());
     }
@@ -152,54 +159,90 @@ pub fn set_policy(hive: Hive, policy: &str, mirror: Option<&str>, name: &str, va
         }
     }
     let present: Vec<usize> = acts.iter().map(|a| a.0).filter(|&i| state[i].0).collect();
-    backup_values(hive, &keys, &present, name, new_backup)?;
+    backup_values(hive, &keys, &opened, &present, name, new_backup)?;
     for &(i, restore) in &acts {
         match restore {
-            Some(prev) => hive.root().create_subkey_with_flags(keys[i], KEY_READ | KEY_WRITE | KEY_WOW64_64KEY)?.0.set_value(name, &prev)?,
-            None => hive.open_write(keys[i])?.delete_value(name)?,
+            Some(prev) => {
+                if opened[i].is_none() { opened[i] = Some(hive.create(keys[i])?); }
+                opened[i].as_ref().ok_or_else(|| io::Error::other("key missing"))?.set_value(name, &prev)?;
+            }
+            None => opened[i].as_ref().ok_or_else(|| io::Error::other("key missing"))?.delete_value(name)?,
         }
     }
     marks.retain(|m| !ids.contains(&m.0));
-    write_marks(&marks)?;
+    write_marks(hive, &marks)?;
     let deleted = acts.iter().any(|a| a.0 == 0 && a.1.is_none());
-    let empty = deleted && hive.open(policy).map(|k| k.enum_values().count() == 0 && k.enum_keys().count() == 0).unwrap_or(false);
-    if empty
-        && let Some(slash) = policy.rfind('\\') {
-            let _ = hive.open_write(&policy[..slash]).and_then(|p| p.delete_subkey(&policy[slash + 1..]));
-        }
+    if deleted && let Some(key) = opened[0].as_ref()
+        && key.enum_values().next().is_none() && key.enum_keys().next().is_none() {
+            let _ = registry::target::delete_key(key);
+    }
     Ok(())
 }
 
 const POLICY_STATE: &str = "policy-state.txt";
+const POLICY_STORE: &str = "SOFTWARE\\Wisping\\PolicyState";
 
 fn mark_id(hive: Hive, key: &str, name: &str) -> String {
     format!("{}|{}|{}", hive.short_name(), key.to_lowercase(), name.to_lowercase())
 }
 
-fn read_marks() -> Vec<(String, Option<u32>)> {
-    let text = fs::read_to_string(data::root().join(POLICY_STATE)).unwrap_or_default();
-    text.lines().filter_map(|l| l.rsplit_once('=')).map(|(k, v)| (k.to_string(), v.trim().parse().ok())).collect()
+fn mark_value(text: &str) -> Option<u32> {
+    text.trim().parse().ok()
 }
 
-fn write_marks(marks: &[(String, Option<u32>)]) -> io::Result<()> {
+fn read_marks(hive: Hive) -> Vec<(String, Option<u32>)> {
+    if hive == Hive::Machine {
+        let Ok(Some(key)) = regbackup::integrity::open_protected(POLICY_STORE, false) else { return Vec::new() };
+        let names: Vec<String> = key.enum_values().flatten().map(|(n, _)| n).collect();
+        return names.into_iter().filter_map(|n| key.get_value::<String, _>(&n).ok().map(|v| (n, mark_value(&v)))).collect();
+    }
+    let machine = format!("{}|", Hive::Machine.short_name());
+    let text = data::read_text(&data::root().join(POLICY_STATE), 64 * 1024).unwrap_or_default();
+    text.lines().filter_map(|l| l.rsplit_once('=')).filter(|(k, _)| !k.starts_with(&machine)).map(|(k, v)| (k.to_string(), mark_value(v))).collect()
+}
+
+fn write_machine_marks(marks: &[(String, Option<u32>)]) -> io::Result<()> {
+    let key = if marks.is_empty() {
+        match regbackup::integrity::open_protected(POLICY_STORE, true)? {
+            Some(key) => key,
+            None => return Ok(()),
+        }
+    } else {
+        regbackup::integrity::protected_store(POLICY_STORE)?
+    };
+    let stale: Vec<String> = key.enum_values().flatten().map(|(n, _)| n).filter(|n| !marks.iter().any(|m| m.0 == *n)).collect();
+    for name in stale {
+        key.delete_value(name)?;
+    }
+    for (id, v) in marks {
+        key.set_value(id, &v.map_or_else(|| "none".to_string(), |v| v.to_string()))?;
+    }
+    Ok(())
+}
+
+fn write_marks(hive: Hive, marks: &[(String, Option<u32>)]) -> io::Result<()> {
+    if hive == Hive::Machine {
+        return write_machine_marks(marks);
+    }
     if marks.is_empty() {
-        return match fs::remove_file(data::root().join(POLICY_STATE)) {
+        return match super::fsx::PinnedDir::open(data::root()).and_then(|dir| dir.remove_file(POLICY_STATE.as_ref())) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         };
     }
     data::ensure_root();
     let text: String = marks.iter().map(|(k, v)| format!("{}={}\r\n", k, v.map_or_else(|| "none".to_string(), |v| v.to_string()))).collect();
-    fs::write(data::root().join(POLICY_STATE), text)
+    super::fsx::write_file(&data::root().join(POLICY_STATE), text.as_bytes())
 }
 
-fn backup_values(hive: Hive, keys: &[&str], idx: &[usize], name: &str, new_backup: &dyn Fn() -> io::Result<PathBuf>) -> io::Result<()> {
+fn backup_values(hive: Hive, keys: &[&str], opened: &[Option<winreg::RegKey>], idx: &[usize], name: &str, new_backup: &dyn Fn() -> io::Result<PathBuf>) -> io::Result<()> {
     if idx.is_empty() {
         return Ok(());
     }
     let dir = new_backup()?;
     for &i in idx {
-        regbackup::export_value(hive, keys[i], name, &dir)?;
+        let key = opened[i].as_ref().ok_or_else(|| io::Error::other("key missing"))?;
+        regbackup::export_open_value(hive, keys[i], key, name, &dir)?;
     }
     Ok(())
 }
@@ -209,9 +252,6 @@ fn policy_of(id: &str) -> Option<&'static Policy> {
 }
 
 pub fn is_on(id: &str) -> bool {
-    if let Some(g) = trayicons::group(id) {
-        return trayicons::is_hidden(trayicons::ROOT, g.needles);
-    }
     match policy_of(id) {
         Some(p) => read_policy(Hive::Machine, p.key, p.name, p.value),
         None => flags(id).map(|p| !read_flags(&p)).unwrap_or(false),
@@ -219,11 +259,6 @@ pub fn is_on(id: &str) -> bool {
 }
 
 pub fn set_on(id: &str, on: bool) -> io::Result<()> {
-    if let Some(g) = trayicons::group(id) {
-        trayicons::set_hidden(trayicons::ROOT, g.needles, on, &data::new_backup_dir)?;
-        data::log(&format!("tool {} {}", id, if on { "enabled" } else { "disabled" }));
-        return Ok(());
-    }
     match policy_of(id) {
         Some(p) => set_policy(Hive::Machine, p.key, p.mirror, p.name, p.value, on, &data::new_backup_dir)?,
         None => {
@@ -253,12 +288,13 @@ pub fn delete_tree(path: &str, backup_dir: &Path) -> io::Result<bool> {
     if !key_allowed(path) {
         return Err(io::Error::other("refused"));
     }
-    if Hive::User.open(path).is_err() {
-        return Ok(false);
-    }
-    regbackup::export_key(Hive::User, path, backup_dir)?;
-    let slash = path.rfind('\\').ok_or_else(|| io::Error::other("bad key"))?;
-    Hive::User.open_write(&path[..slash])?.delete_subkey_all(&path[slash + 1..])?;
+    let tree = match Hive::User.tree(path) {
+        Ok(tree) => tree,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    regbackup::export_tree(Hive::User, path, &tree, backup_dir)?;
+    tree.delete()?;
     Ok(true)
 }
 
@@ -266,12 +302,16 @@ pub fn delete_value(path: &str, name: &str, backup_dir: &Path) -> io::Result<boo
     if !value_allowed(path, name) {
         return Err(io::Error::other("refused"));
     }
-    let Ok(key) = Hive::User.open(path) else { return Ok(false) };
+    let key = match Hive::User.open_write(path) {
+        Ok(key) => key,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
     if key.get_raw_value(name).is_err() {
         return Ok(false);
     }
-    regbackup::export_value(Hive::User, path, name, backup_dir)?;
-    Hive::User.open_write(path)?.delete_value(name)?;
+    regbackup::export_open_value(Hive::User, path, &key, name, backup_dir)?;
+    key.delete_value(name)?;
     Ok(true)
 }
 
@@ -291,16 +331,39 @@ fn kill_explorer() {
     }
 }
 
-fn start_explorer() {
-    let _ = std::process::Command::new(sys::system_tool("explorer.exe")).spawn();
+fn start_explorer(token: Option<&sys::ShellToken>) -> io::Result<()> {
+    let exe = sys::system_tool("explorer.exe");
+    match token {
+        Some(token) => sys::spawn_with(token, &exe, ""),
+        None => std::process::Command::new(exe).spawn().map(drop),
+    }
+}
+
+pub fn remove_empty_backup(backup_dir: &Path) {
+    if let (Some(parent), Some(name)) = (backup_dir.parent(), backup_dir.file_name()) {
+        let _ = super::fsx::PinnedDir::open(parent)
+            .and_then(|parent| parent.deletable_child(name))
+            .and_then(super::fsx::PinnedDir::remove);
+    }
+}
+
+fn with_backup_cleanup(backup_dir: &Path, action: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    let result = action();
+    remove_empty_backup(backup_dir);
+    result
 }
 
 pub fn run(id: &str, backup_dir: &Path) -> io::Result<()> {
+    with_backup_cleanup(backup_dir, || run_tool(id, backup_dir))
+}
+
+fn run_tool(id: &str, backup_dir: &Path) -> io::Result<()> {
     match id {
         "notify" => {
             delete_tree(NOTIFY_SETTINGS, backup_dir)?;
         }
         "tray" => {
+            let token = if sys::is_admin() { Some(sys::shell_token().ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "the desktop shell is unavailable"))?) } else { None };
             kill_explorer();
             let first = delete_tree(NOTIFY_ICONS, backup_dir);
             let mut second = Ok(false);
@@ -309,8 +372,9 @@ pub fn run(id: &str, backup_dir: &Path) -> io::Result<()> {
                     second = Err(e);
                 }
             }
-            start_explorer();
+            let restarted = start_explorer(token.as_ref());
             first?;
+            restarted?;
             second?;
         }
         _ => return Err(io::Error::other("unknown tool")),
@@ -322,3 +386,7 @@ pub fn run(id: &str, backup_dir: &Path) -> io::Result<()> {
 pub fn restart_pc() {
     let _ = sys::hidden("shutdown.exe").args(["/r", "/t", "20"]).output();
 }
+
+#[cfg(test)]
+#[path = "tools/tests.rs"]
+mod tests;

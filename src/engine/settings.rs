@@ -1,7 +1,6 @@
-use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use super::data;
+use super::{data, fsx};
 
 const FILE: &str = "settings.txt";
 const STATE: &str = "state.txt";
@@ -45,7 +44,7 @@ pub fn lang_name(code: u8) -> &'static str {
 }
 
 pub fn load() {
-    let text = fs::read_to_string(data::root().join(FILE)).unwrap_or_default();
+    let text = data::read_text(&data::root().join(FILE), 64 * 1024).unwrap_or_default();
     LOG.store(flag(&text, "log").unwrap_or(false), Ordering::SeqCst);
     REMEMBER.store(flag(&text, "remember").unwrap_or(false), Ordering::SeqCst);
     RESTORE_POINT.store(flag(&text, "restorepoint").unwrap_or(false), Ordering::SeqCst);
@@ -79,7 +78,6 @@ pub fn lang_choice() -> u8 {
 }
 
 fn save_flags() {
-    data::ensure_root();
     let text = format!(
         "log={}\r\nremember={}\r\nrestorepoint={}\r\nlowdisk={}\r\nhistory={}\r\nlang={}\r\n",
         log_on() as u8,
@@ -89,7 +87,8 @@ fn save_flags() {
         history_on() as u8,
         lang_name(lang_choice())
     );
-    let _ = fs::write(data::root().join(FILE), text);
+    data::ensure_root();
+    let _ = fsx::write_file(&data::root().join(FILE), text.as_bytes());
 }
 
 pub fn set_log(on: bool) {
@@ -121,7 +120,7 @@ pub fn set_remember(on: bool) {
     REMEMBER.store(on, Ordering::SeqCst);
     save_flags();
     if !on {
-        let _ = fs::remove_file(data::root().join(STATE));
+        let _ = fsx::PinnedDir::open(data::root()).and_then(|dir| dir.remove_file(STATE.as_ref()));
     }
 }
 
@@ -135,13 +134,14 @@ pub fn load_state() -> Option<WindowState> {
     if !remember_on() {
         return None;
     }
-    parse_state(&fs::read_to_string(data::root().join(STATE)).ok()?)
+    parse_state(&data::read_text(&data::root().join(STATE), 64 * 1024)?)
 }
 
 pub fn save_state(state: WindowState) {
     if !remember_on() {
         return;
     }
+    let text = format!("page={}\r\nwidth={}\r\nheight={}\r\n", state.page, state.width, state.height);
     data::ensure_root();
-    let _ = fs::write(data::root().join(STATE), format!("page={}\r\nwidth={}\r\nheight={}\r\n", state.page, state.width, state.height));
+    let _ = fsx::write_file(&data::root().join(STATE), text.as_bytes());
 }

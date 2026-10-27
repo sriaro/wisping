@@ -1,3 +1,7 @@
+#[cfg(test)]
+#[path = "color/security_tests.rs"]
+mod security_tests;
+
 /// Struct representing a color with red, green, blue, and alpha components.
 #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -67,16 +71,17 @@ impl Color {
     /// The “#” is optional.
     pub fn hex(raw_hex: &str) -> Self {
         let hex = raw_hex.trim_start_matches('#');
+        let channel = |start| hex.get(start..start + 2).map_or(0, hex_to_u8);
 
         if hex.len() == 8 {
             Self::rgba(
-                hex_to_u8(&hex[0..2]),
-                hex_to_u8(&hex[2..4]),
-                hex_to_u8(&hex[4..6]),
-                hex_to_u8(&hex[6..8]),
+                channel(0),
+                channel(2),
+                channel(4),
+                channel(6),
             )
         } else if hex.len() == 6 {
-            Self::rgb(hex_to_u8(&hex[0..2]), hex_to_u8(&hex[2..4]), hex_to_u8(&hex[4..6]))
+            Self::rgb(channel(0), channel(2), channel(4))
         } else {
             Self::rgb(0, 0, 0)
         }

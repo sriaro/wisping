@@ -1,6 +1,6 @@
 # Third-party components
 
-Wisp is GPL-3.0-only. The crates below are compiled into or used to build `Wisp.exe`; each keeps its own licence, listed here as declared in its `Cargo.toml`. Full licence texts ship with each crate on crates.io and in the linked repository.
+Wisping is GPL-3.0-only. The crates below are compiled into or used to build `Wisping.exe`; each keeps its own licence, listed here as declared in its `Cargo.toml`. Full licence texts ship with each crate on crates.io and in the linked repository.
 
 Slint is used under its GPL-3.0 option. The renderer parts patched in `third_party/` keep their original licence files.
 

@@ -703,6 +703,7 @@ where
         flags: ImageFlags,
     ) -> Result<ImageId, ErrorKind> {
         let src = src.into();
+        src.check_data()?;
         let size = src.dimensions();
         let id = self.create_image_empty(size.width, size.height, src.format(), flags)?;
         self.images.update(&mut self.renderer, id, src, 0, 0)?;
@@ -1674,18 +1675,10 @@ where
             params.paint_mat[9],
         ]));
 
-        let (s0, t0) = to_texture_space_transform.transform_point(target_rect.x, target_rect.y);
-        let (s1, t1) =
-            to_texture_space_transform.transform_point(target_rect.x + target_rect.w, target_rect.y + target_rect.h);
-
-        let verts = [
-            Vertex::new(p0, p1, s0, t0),
-            Vertex::new(p4, p5, s1, t1),
-            Vertex::new(p2, p3, s1, t0),
-            Vertex::new(p0, p1, s0, t0),
-            Vertex::new(p6, p7, s0, t1),
-            Vertex::new(p4, p5, s1, t1),
-        ];
+        let verts = [(p0, p1), (p4, p5), (p2, p3), (p0, p1), (p6, p7), (p4, p5)].map(|(x, y)| {
+            let (s, t) = to_texture_space_transform.transform_point(x, y);
+            Vertex::new(x, y, s, t)
+        });
 
         if let &PaintFlavor::Image { id, .. } = paint_flavor {
             cmd.image = Some(id);
@@ -1730,6 +1723,11 @@ where
         let ctx = self.text_context.borrow();
         let font = ctx.font(font_id).ok_or(ErrorKind::NoFontFound)?;
         Ok(font.variation_axes())
+    }
+
+    #[cfg(feature = "textlayout")]
+    fn font_scale(&self) -> f32 {
+        geometry::quantize(self.state().transform.average_scale(), 0.1).min(7.0)
     }
 
     /// Returns information on how the provided text will be drawn with the specified paint.
@@ -2604,6 +2602,83 @@ fn test_image_blit_fast_path() {
     ));
 }
 
+#[test]
+fn image_blit_maps_all_corners_under_canvas_transforms() {
+    for transform in [
+        Transform2D::identity(),
+        Transform2D::translation(3.0, 5.0),
+        Transform2D::new(1.5, 0.0, 0.0, 0.75, 0.0, 0.0),
+        Transform2D::new(-1.0, 0.0, 0.0, 1.0, 90.0, 0.0),
+        Transform2D::new(0.0, 1.0, -1.0, 0.0, 90.0, 0.0),
+    ] {
+        let renderer = RecordingRenderer::default();
+        let commands = renderer.last_commands.clone();
+        let vertices = renderer.last_verts.clone();
+        let mut canvas = Canvas::new(renderer).unwrap();
+        canvas.set_size(100, 100, 1.0);
+        canvas.set_transform(&transform);
+        let image = canvas
+            .create_image_empty(100, 100, PixelFormat::Rgba8, ImageFlags::empty())
+            .unwrap();
+        let paint = Paint::image(image, 0.0, 0.0, 100.0, 100.0, 0.0, 1.0).with_anti_alias(false);
+        let mut path = Path::new();
+        path.rect(10.0, 20.0, 40.0, 30.0);
+        canvas.fill_path(&path, &paint);
+        canvas.flush_to_output(());
+        assert_eq!(
+            first_draw_params(&commands.borrow()).shader_type,
+            ShaderType::TextureCopyUnclipped
+        );
+        let inverse = transform.inverse();
+        let vertices = vertices.borrow();
+        assert_eq!(vertices.len(), 6);
+        for vertex in vertices.iter() {
+            let (x, y) = inverse.transform_point(vertex.x, vertex.y);
+            assert_approx_eq(vertex.u, x / 100.0);
+            assert_approx_eq(vertex.v, y / 100.0);
+        }
+    }
+}
+
+#[test]
+fn image_blit_honors_scissor_and_fallbacks() {
+    for (antialias, angle, rounded, expected_fast) in [
+        (false, 0.0, false, true),
+        (true, 0.0, false, false),
+        (false, 0.5, false, false),
+        (false, 0.0, true, false),
+    ] {
+        let renderer = RecordingRenderer::default();
+        let commands = renderer.last_commands.clone();
+        let vertices = renderer.last_verts.clone();
+        let mut canvas = Canvas::new(renderer).unwrap();
+        canvas.set_size(100, 100, 1.0);
+        if rounded {
+            canvas.rounded_scissor(20.0, 20.0, 10.0, 10.0, 2.0);
+        } else {
+            canvas.scissor(20.0, 20.0, 10.0, 10.0);
+        }
+        let image = canvas
+            .create_image_empty(100, 100, PixelFormat::Rgba8, ImageFlags::FLIP_Y)
+            .unwrap();
+        let paint = Paint::image(image, 0.0, 0.0, 100.0, 100.0, angle, 1.0).with_anti_alias(antialias);
+        let mut path = Path::new();
+        path.rect(10.0, 10.0, 50.0, 50.0);
+        canvas.fill_path(&path, &paint);
+        canvas.flush_to_output(());
+        assert_eq!(
+            first_draw_params(&commands.borrow()).shader_type == ShaderType::TextureCopyUnclipped,
+            expected_fast
+        );
+        if expected_fast {
+            assert!(vertices
+                .borrow()
+                .iter()
+                .all(|v| (20.0..=30.0).contains(&v.x) && (20.0..=30.0).contains(&v.y)));
+        }
+    }
+}
+
 #[cfg(test)]
 fn first_draw_params(commands: &[renderer::Command]) -> &Params {
     use renderer::CommandType;
@@ -2669,32 +2744,35 @@ fn rounded_scissor_radius_is_clamped_into_render_params() {
 #[cfg(feature = "textlayout")]
 #[test]
 fn glyph_scissor_ramp_matches_fill_at_high_dpi() {
-    let renderer = RecordingRenderer::default();
-    let recorded_commands = renderer.last_commands.clone();
-    let mut canvas = Canvas::new(renderer).unwrap();
-    canvas.set_size(100, 100, 2.0);
+    for (dpi, scale) in [(1.0, 1.0), (2.0, 1.0), (2.0, 2.0)] {
+        let renderer = RecordingRenderer::default();
+        let recorded_commands = renderer.last_commands.clone();
+        let mut canvas = Canvas::new(renderer).unwrap();
+        canvas.set_size(100, 100, dpi);
+        canvas.scale(scale, scale);
 
-    let font = canvas
-        .add_font("examples/assets/RobotoFlex-VariableFont.ttf")
-        .expect("Font not found");
-    let paint = Paint::color(Color::white()).with_font(&[font]).with_font_size(16.0);
+        let font = canvas
+            .add_font("examples/assets/RobotoFlex-VariableFont.ttf")
+            .expect("Font not found");
+        let paint = Paint::color(Color::white()).with_font(&[font]).with_font_size(16.0);
 
-    canvas.rounded_scissor(10.0, 10.0, 56.0, 28.0, 14.0);
+        canvas.rounded_scissor(10.0, 10.0, 56.0, 28.0, 14.0);
 
-    let mut rect = Path::new();
-    rect.rect(0.0, 0.0, 100.0, 100.0);
-    canvas.fill_path(&rect, &Paint::color(Color::white()));
-    canvas.fill_text(12.0, 30.0, "Click", &paint).unwrap();
-    canvas.flush_to_output(());
+        let mut rect = Path::new();
+        rect.rect(0.0, 0.0, 100.0, 100.0);
+        canvas.fill_path(&rect, &Paint::color(Color::white()));
+        canvas.fill_text(12.0, 30.0, "Click", &paint).unwrap();
+        canvas.flush_to_output(());
 
-    let commands = recorded_commands.borrow();
-    let fill = first_draw_params(&commands);
-    let glyph = first_glyph_draw_params(&commands);
+        let commands = recorded_commands.borrow();
+        let fill = first_draw_params(&commands);
+        let glyph = first_glyph_draw_params(&commands);
 
-    assert_approx_eq(glyph.scissor_scale[0], 2.0);
-    assert_approx_eq(glyph.scissor_scale[1], 2.0);
-    assert_approx_eq(glyph.scissor_scale[0], fill.scissor_scale[0]);
-    assert_approx_eq(glyph.scissor_scale[1], fill.scissor_scale[1]);
+        assert_approx_eq(glyph.scissor_scale[0], scale);
+        assert_approx_eq(glyph.scissor_scale[1], scale);
+        assert_approx_eq(glyph.scissor_scale[0], fill.scissor_scale[0]);
+        assert_approx_eq(glyph.scissor_scale[1], fill.scissor_scale[1]);
+    }
 }
 
 #[test]
@@ -3763,6 +3841,8 @@ fn decoration_rect_spans_the_run_advance_box() {
             .expect("failed to load test font");
 
         let paint = Paint::color(Color::black())
+            // Inspect the exact rectangle, without the inset antialiasing fill.
+            .with_anti_alias(false)
             .with_font(&[latin, arabic])
             .with_font_size(40.0)
             .with_text_baseline(Baseline::Alphabetic)

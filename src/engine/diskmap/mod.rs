@@ -2,7 +2,9 @@ pub mod dups;
 pub mod owners;
 pub mod treemap;
 
-use std::os::windows::fs::MetadataExt;
+use std::collections::HashSet;
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -11,6 +13,7 @@ use super::fsx;
 
 pub const NONE: u32 = u32::MAX;
 pub const CATS: usize = 8;
+const CAT_SPAN: u32 = 256;
 const BIG_FILE: u64 = 128 * 1024;
 const CHUNK_BITS: u32 = 20;
 const CHUNK: usize = 1 << CHUNK_BITS;
@@ -34,7 +37,6 @@ pub struct Node {
     pub cat: u32,
     pub len: u16,
     pub kind: Kind,
-    pub locked: bool,
 }
 
 #[derive(Default)]
@@ -118,19 +120,12 @@ impl Tree {
 
     pub fn cats(&self, idx: u32) -> [u64; CATS] {
         let n = &self.nodes[idx as usize];
-        match n.kind {
-            Kind::Dir => self.dir_cats[n.cat as usize],
-            Kind::File => {
-                let mut c = [0u64; CATS];
-                c[category_of(self.name(n))] = n.size;
-                c
-            }
-            Kind::Small => {
-                let mut c = [0u64; CATS];
-                c[7] = n.size;
-                c
-            }
+        if n.kind == Kind::Dir && n.cat != NONE {
+            return self.dir_cats[n.cat as usize];
         }
+        let mut c = [0u64; CATS];
+        add_cats(&self.nodes, &self.names, idx, &mut c);
+        c
     }
 
     pub fn path_of(&self, idx: u32) -> PathBuf {
@@ -199,6 +194,7 @@ struct Shared<'a> {
     cv: Condvar,
     pending: AtomicUsize,
     progress: &'a Progress,
+    linked: Mutex<HashSet<u128>>,
 }
 
 struct Listing {
@@ -215,7 +211,19 @@ impl Listing {
     }
 }
 
-fn list_dir(path: &Path, progress: &Progress) -> Option<Listing> {
+fn first_link(path: &Path, linked: &Mutex<HashSet<u128>>) -> bool {
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+    let Ok(file) = std::fs::OpenOptions::new().access_mode(0x80).share_mode(7).custom_flags(0x0020_0000).open(path) else { return true };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.is_err() || info.nNumberOfLinks <= 1 {
+        return true;
+    }
+    let id = ((info.dwVolumeSerialNumber as u128) << 64) | ((info.nFileIndexHigh as u128) << 32) | info.nFileIndexLow as u128;
+    linked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id)
+}
+
+fn list_dir(path: &Path, progress: &Progress, linked: &Mutex<HashSet<u128>>) -> Option<Listing> {
     let rd = std::fs::read_dir(path).ok()?;
     let mut l = Listing { text: String::new(), dirs: Vec::new(), big: Vec::new(), small_files: 0, small_bytes: 0 };
     let (mut files, mut bytes) = (0u64, 0u64);
@@ -232,7 +240,10 @@ fn list_dir(path: &Path, progress: &Progress) -> Option<Listing> {
         if md.is_dir() {
             l.dirs.push((start, len));
         } else {
-            let size = md.len();
+            let mut size = if fsx::attrs_cloud(md.file_attributes()) { 0 } else { md.len() };
+            if size >= BIG_FILE && !first_link(&entry.path(), linked) {
+                size = 0;
+            }
             files += 1;
             bytes += size;
             if size >= BIG_FILE {
@@ -251,7 +262,7 @@ fn list_dir(path: &Path, progress: &Progress) -> Option<Listing> {
 }
 
 fn blank(off: u32, len: u16, parent: u32, kind: Kind) -> Node {
-    Node { size: 0, off, parent, first: 0, count: 0, files: 0, cat: 0, len, kind, locked: false }
+    Node { size: 0, off, parent, first: 0, count: 0, files: 0, cat: 0, len, kind }
 }
 
 fn small_label(count: u32) -> String {
@@ -261,7 +272,7 @@ fn small_label(count: u32) -> String {
 fn work(sh: &Shared) {
     loop {
         let task = {
-            let mut q = sh.queue.lock().unwrap();
+            let mut q = sh.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             loop {
                 if sh.progress.cancel.load(Ordering::Relaxed) {
                     return;
@@ -275,11 +286,11 @@ fn work(sh: &Shared) {
                 q = sh.cv.wait_timeout(q, std::time::Duration::from_millis(100)).unwrap().0;
             }
         };
-        let listing = list_dir(&task.path, sh.progress);
+        let listing = list_dir(&task.path, sh.progress, &sh.linked);
         let mut next = Vec::new();
         match listing {
             Some(l) => {
-                let mut guard = sh.nodes.lock().unwrap();
+                let mut guard = sh.nodes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 let (nodes, names) = &mut *guard;
                 let first = nodes.len() as u32;
                 nodes.reserve(l.dirs.len() + l.big.len() + 1);
@@ -311,17 +322,15 @@ fn work(sh: &Shared) {
                     next.push(Task { node: first + i as u32, path: task.path.join(l.name(s, len)) });
                 }
             }
-            None => {
-                sh.nodes.lock().unwrap().0[task.node as usize].locked = true;
-            }
+            None => {}
         }
         if !next.is_empty() {
             sh.pending.fetch_add(next.len(), Ordering::SeqCst);
-            sh.queue.lock().unwrap().extend(next);
+            sh.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(next);
             sh.cv.notify_all();
         }
         if sh.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-            let _guard = sh.queue.lock().unwrap();
+            let _guard = sh.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             sh.cv.notify_all();
         }
     }
@@ -337,6 +346,7 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
         cv: Condvar::new(),
         pending: AtomicUsize::new(1),
         progress,
+        linked: Mutex::new(HashSet::new()),
     };
     let workers = (super::cleaner::worker_count() * 2).min(32);
     std::thread::scope(|s| {
@@ -350,32 +360,54 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
     let (mut nodes, mut names) = sh.nodes.into_inner().unwrap();
     nodes.shrink_to_fit();
     names.seal();
-    let mut dirs = 0u32;
-    for n in nodes.iter_mut() {
-        if n.kind == Kind::Dir {
-            n.cat = dirs;
-            dirs += 1;
-        }
-    }
-    let mut dir_cats = vec![[0u64; CATS]; dirs as usize];
+    let mut weight = vec![1u32; nodes.len()];
     for i in (1..nodes.len()).rev() {
-        let (parent, size, files, kind, cat, off, len) = {
-            let n = &nodes[i];
-            (n.parent as usize, n.size, n.files, n.kind, n.cat, n.off, n.len)
-        };
-        let pc = nodes[parent].cat as usize;
-        match kind {
-            Kind::File => dir_cats[pc][category_of(names.get(off, len))] += size,
-            Kind::Small => dir_cats[pc][7] += size,
-            Kind::Dir => {
-                let c = dir_cats[cat as usize];
-                for k in 0..CATS {
-                    dir_cats[pc][k] += c[k];
-                }
-            }
-        }
+        let (parent, size, files) = (nodes[i].parent as usize, nodes[i].size, nodes[i].files);
         nodes[parent].size += size;
         nodes[parent].files += files;
+        weight[parent] = weight[parent].saturating_add(weight[i]);
+    }
+    let mut big = 0u32;
+    for (i, n) in nodes.iter_mut().enumerate() {
+        n.cat = if n.kind == Kind::Dir && (i == 0 || weight[i] >= CAT_SPAN) {
+            big += 1;
+            big - 1
+        } else {
+            NONE
+        };
+    }
+    drop(weight);
+    let mut dir_cats = vec![[0u64; CATS]; big as usize];
+    for i in (0..nodes.len()).rev() {
+        let n = nodes[i];
+        if n.cat == NONE {
+            continue;
+        }
+        let mut c = [0u64; CATS];
+        for child in n.first..n.first + n.count {
+            let m = &nodes[child as usize];
+            match m.kind {
+                Kind::Dir if m.cat != NONE => {
+                    for (sum, part) in c.iter_mut().zip(dir_cats[m.cat as usize]) {
+                        *sum += part;
+                    }
+                }
+                _ => add_cats(&nodes, &names, child, &mut c),
+            }
+        }
+        dir_cats[n.cat as usize] = c;
     }
     Tree { nodes, dir_cats, names, root: root.to_path_buf() }
+}
+
+fn add_cats(nodes: &[Node], names: &Names, idx: u32, c: &mut [u64; CATS]) {
+    let mut stack = vec![idx];
+    while let Some(i) = stack.pop() {
+        let n = &nodes[i as usize];
+        match n.kind {
+            Kind::File => c[category_of(names.get(n.off, n.len))] += n.size,
+            Kind::Small => c[7] += n.size,
+            Kind::Dir => stack.extend(n.first..n.first + n.count),
+        }
+    }
 }

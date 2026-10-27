@@ -65,6 +65,35 @@ fn set_busy(c: &Ctx, id: Option<&str>) {
     }
 }
 
+fn clear(ui: &MainWindow) {
+    BUSY.with(|b| *b.borrow_mut() = None);
+    push(ui);
+}
+
+fn switch(c: &Ctx, id: &'static str, on: bool) {
+    if BUSY.with(|b| b.borrow().is_some()) {
+        if let Some(ui) = c.weak.upgrade() {
+            push(&ui);
+        }
+        return;
+    }
+    set_busy(c, Some(id));
+    let weak = c.weak.clone();
+    let core = c.core.clone();
+    std::thread::spawn(move || {
+        let _reset = crate::app::panic_reset(&weak, clear);
+        let result = tools::set_on(id, on);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let c = Ctx::new(ui.as_weak(), core);
+            set_busy(&c, None);
+            match result {
+                Ok(()) => toast(&c, i18n::get(&format!("tools.{}.{}", id, if on { "on" } else { "off" }))),
+                Err(e) => show_error(&c, e.to_string()),
+            }
+        });
+    });
+}
+
 fn finish(c: &Ctx, id: &str, result: std::io::Result<()>) {
     set_busy(c, None);
     match result {
@@ -88,6 +117,7 @@ fn start(c: &Ctx, id: &'static str) {
     let weak = c.weak.clone();
     let core = c.core.clone();
     std::thread::spawn(move || {
+        let _reset = crate::app::panic_reset(&weak, clear);
         let result = data::new_backup_dir().and_then(|dir| tools::run(id, &dir));
         let _ = weak.upgrade_in_event_loop(move |ui| {
             crate::winui::trim_soon();
@@ -110,12 +140,8 @@ pub fn install(c: &Ctx) {
     st.on_switched({
         let c = c.clone();
         move |id, on| {
-            match tools::set_on(id.as_str(), on) {
-                Ok(()) => toast(&c, i18n::get(&format!("tools.{}.{}", id, if on { "on" } else { "off" }))),
-                Err(e) => show_error(&c, e.to_string()),
-            }
-            if let Some(ui) = c.weak.upgrade() {
-                push(&ui);
+            if let Some(info) = tools::TOOLS.iter().find(|t| t.id == id.as_str()) {
+                switch(&c, info.id, on);
             }
         }
     });

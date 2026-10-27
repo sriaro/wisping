@@ -9,11 +9,16 @@ use super::fsx::{self, direct_child};
 use super::regbackup::{self, Hive};
 use super::leftovers;
 use super::regscan;
-use super::trayicons;
+
+pub(super) mod target;
+
+#[cfg(test)]
+mod tests;
 
 const CV: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion";
+const TRAY_ICONS: &str = "Control Panel\\NotifyIconSettings";
 const MUI_PATH: &str = "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache";
-pub const TEST_KEY: &str = "Software\\WispSelfTest";
+pub const TEST_KEY: &str = "Software\\WispingSelfTest";
 
 static ALLOW_TEST_KEY: AtomicBool = AtomicBool::new(false);
 
@@ -77,7 +82,7 @@ pub fn first_path(command: &str) -> Option<String> {
     if s.starts_with("\\\\") {
         return cut_at_ext(&s, &[".exe"]);
     }
-    if Path::new(&s).is_file() {
+    if fsx::local_drive_path(&s) && Path::new(&s).is_file() {
         return Some(s);
     }
     cut_at_ext(&s, &[".exe"])
@@ -104,7 +109,7 @@ pub fn cut_at_ext(s: &str, exts: &[&str]) -> Option<String> {
 }
 
 pub fn missing(path: &str) -> bool {
-    if path.is_empty() || path.starts_with('\\') {
+    if !fsx::local_drive_path(path) {
         return false;
     }
     let p = Path::new(path);
@@ -118,7 +123,7 @@ pub fn missing(path: &str) -> bool {
     if !root.is_dir() {
         return false;
     }
-    !p.exists()
+    matches!(p.try_exists(), Ok(false))
 }
 
 pub fn is_leftover(kind: &str) -> bool {
@@ -158,11 +163,19 @@ pub fn run() -> Vec<RegIssue> {
     scan_kinds(&KINDS)
 }
 
+fn kinds_of(issues: &[RegIssue]) -> Vec<&'static str> {
+    KINDS.iter().copied().filter(|k| issues.iter().any(|i| i.kind == *k)).collect()
+}
+
 pub fn rescan(old: &[RegIssue], fixed: &[RegIssue]) -> Vec<RegIssue> {
-    let kinds: Vec<&str> = KINDS.iter().copied().filter(|k| fixed.iter().any(|i| i.kind == *k)).collect();
+    let kinds = kinds_of(fixed);
+    let fresh = scan_kinds(&kinds);
+    merge(old, &kinds, fresh)
+}
+
+fn merge(old: &[RegIssue], kinds: &[&str], mut fresh: Vec<RegIssue>) -> Vec<RegIssue> {
     let picked: HashSet<String> = old.iter().filter(|i| i.selected).map(RegIssue::id).collect();
     let known: HashSet<String> = old.iter().map(RegIssue::id).collect();
-    let mut fresh = scan_kinds(&kinds);
     for i in &mut fresh {
         if known.contains(&i.id()) {
             i.selected = picked.contains(&i.id());
@@ -196,10 +209,14 @@ fn allowed(i: &RegIssue) -> bool {
         "trayicon" => {
             i.hive == Hive::User
                 && i.value_name.is_none()
-                && direct_child(&lower, &format!("{}\\", trayicons::ROOT.to_lowercase()))
+                && direct_child(&lower, &format!("{}\\", TRAY_ICONS.to_lowercase()))
                 && lower.rsplit('\\').next().is_some_and(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()))
         }
-        "apppath" => i.value_name.is_none() && direct_child(&lower, &format!("{}\\app paths\\", CV.to_lowercase())),
+        "apppath" => {
+            i.value_name.is_none()
+                && (direct_child(&lower, &format!("{}\\app paths\\", CV.to_lowercase()))
+                    || (i.hive == Hive::Machine && direct_child(&lower, "software\\wow6432node\\microsoft\\windows\\currentversion\\app paths\\")))
+        }
         "uninstall" => {
             i.value_name.is_none()
                 && (direct_child(&lower, &format!("{}\\uninstall\\", CV.to_lowercase()))
@@ -222,16 +239,25 @@ fn shared_dlls(list: &mut Vec<RegIssue>) {
 }
 
 fn app_paths(list: &mut Vec<RegIssue>) {
-    for hive in [Hive::Machine, Hive::User] {
-        let Ok(key) = hive.open(&format!("{}\\App Paths", CV)) else { continue };
+    let sources = [
+        (Hive::Machine, format!("{}\\App Paths", CV)),
+        (Hive::Machine, "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths".to_string()),
+        (Hive::User, format!("{}\\App Paths", CV)),
+    ];
+    for (hive, path) in sources {
+        let wow = path.contains("WOW6432Node");
+        let Ok(key) = hive.open(&path) else { continue };
         for name in key.enum_keys().flatten() {
-            let Ok(sub) = key.open_subkey_with_flags(&name, KEY_READ | KEY_WOW64_64KEY) else { continue };
+            let Ok(sub) = target::open_child(&key, &name, KEY_READ | KEY_WOW64_64KEY) else { continue };
             let def = regbackup::read_string(&sub, "");
+            if wow && def.as_deref().is_some_and(|d| d.contains('%')) {
+                continue;
+            }
             let Some(p) = def.as_deref().and_then(first_path) else { continue };
             if !missing(&p) {
                 continue;
             }
-            list.push(RegIssue::new(hive, "apppath", &format!("{}\\App Paths\\{}", CV, name), None, &p));
+            list.push(RegIssue::new(hive, "apppath", &format!("{}\\{}", path, name), None, &p));
         }
     }
 }
@@ -243,9 +269,10 @@ fn uninstall(list: &mut Vec<RegIssue>) {
         (Hive::User, format!("{}\\Uninstall", CV)),
     ];
     for (hive, path) in sources {
+        let wow = path.contains("WOW6432Node");
         let Ok(key) = hive.open(&path) else { continue };
         for name in key.enum_keys().flatten() {
-            let Ok(s) = key.open_subkey_with_flags(&name, KEY_READ | KEY_WOW64_64KEY) else { continue };
+            let Ok(s) = target::open_child(&key, &name, KEY_READ | KEY_WOW64_64KEY) else { continue };
             if regbackup::read_dword(&s, "SystemComponent") == Some(1) {
                 continue;
             }
@@ -257,6 +284,9 @@ fn uninstall(list: &mut Vec<RegIssue>) {
             }
             let Some(display) = regbackup::read_string(&s, "DisplayName") else { continue };
             let cmd = regbackup::read_string(&s, "UninstallString").or_else(|| regbackup::read_string(&s, "QuietUninstallString"));
+            if wow && cmd.as_deref().is_some_and(|c| c.contains('%')) {
+                continue;
+            }
             let Some(p) = cmd.as_deref().and_then(first_path) else { continue };
             if p.to_lowercase().contains("msiexec") || !missing(&p) {
                 continue;
@@ -296,21 +326,21 @@ pub fn tray_exe(raw: &str) -> Option<String> {
 }
 
 fn tray_icons(list: &mut Vec<RegIssue>) {
-    let Ok(key) = Hive::User.open(trayicons::ROOT) else { return };
+    let Ok(key) = Hive::User.open(TRAY_ICONS) else { return };
     for id in key.enum_keys().flatten() {
         if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
-        let Ok(sub) = key.open_subkey_with_flags(&id, KEY_READ | KEY_WOW64_64KEY) else { continue };
+        let Ok(sub) = target::open_child(&key, &id, KEY_READ | KEY_WOW64_64KEY) else { continue };
         let Some(raw) = regbackup::read_string(&sub, "ExecutablePath") else { continue };
-        let Some(exe) = tray_exe(&raw) else { continue };
+        let Some(exe) = tray_exe(&raw).filter(|e| fsx::local_drive_path(e)) else { continue };
         let gone = matches!(std::fs::metadata(&exe), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
         if exe.to_lowercase().contains("\\windowsapps\\") || !gone || !missing(&exe) {
             continue;
         }
         let tip = regbackup::read_string(&sub, "InitialTooltip").unwrap_or_default();
         let detail = if tip.is_empty() { exe } else { format!("{} -> {}", tip, exe) };
-        list.push(RegIssue::new(Hive::User, "trayicon", &format!("{}\\{}", trayicons::ROOT, id), None, &detail));
+        list.push(RegIssue::new(Hive::User, "trayicon", &format!("{}\\{}", TRAY_ICONS, id), None, &detail));
     }
 }
 
@@ -342,12 +372,21 @@ fn mui_cache(list: &mut Vec<RegIssue>) {
 }
 
 pub fn fix(issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<String>) -> usize {
+    fix_scanned(issues, backup_dir, errors).0
+}
+
+pub fn fix_and_rescan(old: &[RegIssue], issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<String>) -> (usize, Vec<RegIssue>) {
+    let (ok, scanned) = fix_scanned(issues, backup_dir, errors);
+    let kinds = kinds_of(issues);
+    let fresh = scanned.unwrap_or_else(|| scan_kinds(&kinds));
+    (ok, merge(old, &kinds, fresh))
+}
+
+fn fix_scanned(issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<String>) -> (usize, Option<Vec<RegIssue>>) {
     let mut ok = 0;
-    let mut live: HashSet<String> = HashSet::new();
-    if !allow_test_key() {
-        let kinds: Vec<&str> = KINDS.iter().copied().filter(|k| issues.iter().any(|i| i.kind == *k)).collect();
-        live.extend(scan_kinds(&kinds).iter().map(RegIssue::id));
-    }
+    let mut done: HashSet<String> = HashSet::new();
+    let scanned = (!allow_test_key()).then(|| scan_kinds(&kinds_of(issues)));
+    let live: HashSet<String> = scanned.iter().flatten().map(RegIssue::id).collect();
     for i in issues {
         if !allowed(i) {
             errors.push(format!("{}: refused", i.display()));
@@ -367,6 +406,7 @@ pub fn fix(issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<String>) -> 
             Ok(()) => {
                 data::log(&format!("registry fixed {}", i.display()));
                 ok += 1;
+                done.insert(i.id());
             }
             Err(e) => {
                 errors.push(format!("{}: {}", i.display(), e));
@@ -374,7 +414,22 @@ pub fn fix(issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<String>) -> 
             }
         }
     }
-    ok
+    let scanned = scanned.map(|list| {
+        let removed: Vec<&RegIssue> = issues.iter().filter(|i| done.contains(&i.id())).collect();
+        list.into_iter().filter(|j| !removed.iter().any(|i| covers(i, j))).collect()
+    });
+    (ok, scanned)
+}
+
+fn covers(fixed: &RegIssue, other: &RegIssue) -> bool {
+    if fixed.hive != other.hive {
+        return false;
+    }
+    let (a, b) = (fixed.key_path.to_lowercase(), other.key_path.to_lowercase());
+    match &fixed.value_name {
+        Some(v) => a == b && other.value_name.as_deref().is_some_and(|w| w.eq_ignore_ascii_case(v)),
+        None => a == b || fsx::key_within(&b, &a),
+    }
 }
 
 fn fix_one(i: &RegIssue, backup_dir: &Path) -> std::io::Result<()> {
@@ -383,14 +438,13 @@ fn fix_one(i: &RegIssue, backup_dir: &Path) -> std::io::Result<()> {
     }
     match &i.value_name {
         None => {
-            regbackup::export_key(i.hive, &i.key_path, backup_dir)?;
-            let slash = i.key_path.rfind('\\').ok_or_else(|| std::io::Error::other("bad key"))?;
-            let parent = i.hive.open_write(&i.key_path[..slash])?;
-            parent.delete_subkey_all(&i.key_path[slash + 1..])
+            let tree = i.hive.tree(&i.key_path)?;
+            regbackup::export_tree(i.hive, &i.key_path, &tree, backup_dir)?;
+            tree.delete()
         }
         Some(v) => {
-            regbackup::export_value(i.hive, &i.key_path, v, backup_dir)?;
             let key = i.hive.open_write(&i.key_path)?;
+            regbackup::export_open_value(i.hive, &i.key_path, &key, v, backup_dir)?;
             key.delete_value(v)
         }
     }

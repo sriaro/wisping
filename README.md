@@ -1,20 +1,4 @@
-# Wisp
-
-English | [简体中文](README.zh-CN.md)
-
-<details>
-<summary><b>简体中文（点击展开）</b></summary>
-
-一款绿色便携的 Windows 清理工具，只有一个 exe，界面支持中文和英文。
-
-- 清理垃圾文件，查找失效的注册表项，管理启动项和已安装的程序，分析磁盘占用，还提供一些常用的 Windows 小调整。
-- 安全第一：没有你的确认，什么都不会删；修复注册表之前会先备份；所有可选的记录功能默认都是关闭的。
-- 空闲时零开销：没有后台服务，不用的时候也不占 CPU。
-- 下载：到 [Releases](https://github.com/sriaro/wisp/releases) 下载 zip，解压后双击运行 `Wisp.exe`，不需要安装。
-
-完整中文说明见 [README.zh-CN.md](README.zh-CN.md)。
-
-</details>
+# Wisping
 
 A portable, single-exe Windows cleaner with an English and Chinese interface. Rust, Slint (femtovg renderer), liquid-glass look.
 
@@ -25,7 +9,7 @@ A portable, single-exe Windows cleaner with an English and Chinese interface. Ru
 
 ## Download
 
-Get `Wisp-x.y.z-win-x64.zip` from [Releases](https://github.com/sriaro/wisp/releases), unzip it anywhere and run `Wisp.exe`. There is no installer.
+Get `Wisping-x.y.z-win-x64.zip` from this repository's Releases page, unzip it anywhere and run `Wisping.exe`. There is no installer.
 
 The exe is not code-signed, so Windows SmartScreen may warn on the first run. Compare the SHA-256 on the release page with your download.
 
@@ -37,19 +21,19 @@ Needs Windows 10/11 and Rust 1.99 or newer.
 cargo build --release
 ```
 
-The result is `target/release/Wisp.exe`, a single static executable.
+The result is `target/release/Wisping.exe`, a single static executable.
 
 To publish an exe, build with `tools/build-release.ps1` instead. It maps the project, Cargo and Rust folders to neutral names so the exe carries no local paths or user name.
 
 ## Test
 
 ```
-target\release\Wisp.exe --selftest result.txt
+target\release\Wisping.exe --selftest result.txt
 ```
 
-The last line of `result.txt` must be `ALL PASS`. Close any running Wisp first; one check claims the single-instance lock.
+The last line of `result.txt` must be `ALL PASS`. Close any running Wisping first; one check claims the single-instance lock.
 
-`Wisp.exe --render <dir>` writes screenshots of every page; `PC_PREVIEW_ROOT` sets the folder the disk page scans, `PC_PREVIEW_ONLY` keeps only scenes whose name contains the text (for example `light-disk`), and `PC_PREVIEW_TICK` is the wait per scene in milliseconds.
+`Wisping.exe --render <dir>` writes screenshots of every page; `WISPING_PREVIEW_ROOT` sets the folder the disk page scans, `WISPING_PREVIEW_ONLY` keeps only scenes whose name contains the text (for example `light-disk`), and `WISPING_PREVIEW_TICK` is the wait per scene in milliseconds.
 
 ## Layout
 
@@ -78,13 +62,15 @@ cd tools/make-assets && cargo run --release -- ../../assets ../../ui/art
 
 ## Data
 
-Wisp keeps backups, settings, history and the log in a `data` folder next to `Wisp.exe` by default; the folder can be moved from the Backups page. If the exe sits in a temporary folder (for example when run straight from a zip), the data goes to `%LOCALAPPDATA%\Wisp` instead, so temp cleaning cannot remove it. The `data` folder is never part of the source tree.
+Wisping keeps backups, settings, history and the log in a `data` folder next to `Wisping.exe` by default; the folder can be moved from the Backups page. If the exe sits in a temporary folder (for example when run straight from a zip), the data goes to `%LOCALAPPDATA%\Wisping` instead, so temp cleaning cannot remove it. The `data` folder is never part of the source tree.
+
+Privileged registry restore requires an unchanged backup created by Wisping while running as administrator. Its integrity record is kept in an administrator-protected registry store on that PC, separate from the movable data folder. Older or edited backups cannot be restored with administrator rights. An unelevated restore can still use older backups containing only current-user keys.
 
 ## Licence
 
-Wisp is free software under the GNU General Public License version 3 only; see `LICENSE`. Copyright (C) 2026 sriaro. Under section 7(b) of that licence, copies and modified versions must keep the author attribution "sriaro"; the exact wording is in `NOTICE`. Wisp is built on Slint, used under its GPL-3.0 option.
+Wisping is free software under the GNU General Public License version 3 only; see `LICENSE`. Copyright (C) 2026 sriaro. Under section 7(b) of that licence, copies and modified versions must keep the author attribution "sriaro"; the exact wording is in `NOTICE`. Wisping is built on Slint, used under its GPL-3.0 option.
 
-Wisp is provided without any warranty (see sections 15 and 16 of the licence). It deletes files and edits the registry only after you confirm; back up anything you cannot lose.
+Wisping is provided without any warranty (see sections 15 and 16 of the licence). It deletes files and edits the registry only after you confirm; back up anything you cannot lose.
 
 Every crate compiled into the exe, with its licence, is listed in `THIRD-PARTY.md`.
 

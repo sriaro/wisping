@@ -43,6 +43,9 @@ pub fn cat_style(id: &str) -> (&'static str, i32) {
         "nvidia" => ("cpu", 5),
         "winrar" => ("archive", 3),
         "devcache" => ("box", 2),
+        "appcache" => ("box", 5),
+        "office" => ("file", 5),
+        "storeapps" => ("box", 1),
         "recycle" => ("trash", 6),
         "aiapps" => ("sparkles", 4),
         "aicli" => ("file", 4),
@@ -219,7 +222,11 @@ pub fn needs_admin(e: &StartupEntry, delete: bool) -> bool {
 
 pub fn start_item(e: &StartupEntry, admin: bool, idx: usize) -> StartItem {
     let (kind_key, icon, tint) = match e.kind {
+        StartupKind::Run if e.approved_sub.is_empty() && e.key_path.to_lowercase().contains("windows nt\\currentversion\\windows") => ("s.legacyrun", "power", 1),
+        StartupKind::Run if e.approved_sub.is_empty() && e.key_path.to_lowercase().contains("\\policies\\") => ("s.policyrun", "power", 1),
+        StartupKind::Run if e.approved_sub.is_empty() => ("s.runonce", "power", 1),
         StartupKind::Run => ("s.run", "power", 1),
+        StartupKind::Advanced => ("s.advanced", "shield", 6),
         StartupKind::Folder => ("s.folder", "power", 5),
         StartupKind::Packaged => ("s.packaged", "power", 2),
         StartupKind::Task => ("s.task", "clock", 3),
@@ -230,6 +237,8 @@ pub fn start_item(e: &StartupEntry, admin: bool, idx: usize) -> StartItem {
     let toggle_ok = !needs_admin(e, false) || admin;
     let delete_ok = !needs_admin(e, true) || admin;
     let (role, advice) = classify::classify(e);
+    let locked = e.kind == StartupKind::Advanced;
+    let fixed = locked || (e.kind == StartupKind::Run && e.approved_sub.is_empty());
     StartItem {
         idx: idx as i32,
         icon: icon.into(),
@@ -240,10 +249,10 @@ pub fn start_item(e: &StartupEntry, admin: bool, idx: usize) -> StartItem {
         kind_name: kind_name.into(),
         tint,
         enabled: e.enabled,
-        can_toggle: !e.policy && !e.system && toggle_ok,
-        can_delete: e.kind != StartupKind::Packaged && !e.system && delete_ok,
+        can_toggle: !e.policy && !e.system && !fixed && toggle_ok,
+        can_delete: e.kind != StartupKind::Packaged && !e.system && !locked && delete_ok,
         missing: e.missing,
-        admin: !e.system && (needs_admin(e, false) || needs_admin(e, true)) && !admin,
+        admin: !e.system && !locked && (needs_admin(e, false) || needs_admin(e, true)) && !admin,
         tag: format!("{}  ·  {}", i18n::get(&format!("role.{}", role.key())), i18n::get(&format!("advice.{}", advice.key()))).into(),
         tone: advice.tone(),
     }
@@ -317,7 +326,7 @@ pub fn windows_on(core: &Core) -> usize {
 }
 
 pub fn push_overview_cards(st: &AppState, core: &Core) {
-    let drives: Vec<DriveItem> = drives::fixed()
+    let drives: Vec<DriveItem> = drives::cached()
         .iter()
         .take(4)
         .map(|d| {

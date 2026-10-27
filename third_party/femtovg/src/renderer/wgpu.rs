@@ -68,6 +68,10 @@ const UNIFORM_SLOTS_PER_COMMAND: u64 = 2;
 const MIN_UNIFORM_SLOTS: u64 = 64;
 const MIN_VERTEX_BYTES: u64 = 4096;
 
+#[cfg(test)]
+#[path = "wgpu/security_tests.rs"]
+mod security_tests;
+
 const UNIFORM_BUFFER_LABEL: &str = "Fragment Uniform Buffer";
 const UNIFORM_BUFFER_USAGE: wgpu::BufferUsages = wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST);
 const VERTEX_BUFFER_LABEL: &str = "Main Vertex Buffer";
@@ -782,6 +786,8 @@ impl Renderer for WGPURenderer {
         data.check_update(&image.info, x, y)?;
 
         let converted_rgba;
+        let contiguous_rgba;
+        let contiguous_gray;
         let (bytes, bpp) = match data {
             crate::ImageSource::Rgb(img) => {
                 converted_rgba = img
@@ -795,8 +801,14 @@ impl Renderer for WGPURenderer {
                     .collect::<Vec<_>>();
                 (converted_rgba.as_bytes(), 4)
             }
-            crate::ImageSource::Rgba(img) => (img.buf().as_bytes(), 4),
-            crate::ImageSource::Gray(img) => (img.buf().as_bytes(), 1),
+            crate::ImageSource::Rgba(img) => {
+                contiguous_rgba = img.to_contiguous_buf().0;
+                (contiguous_rgba.as_bytes(), 4)
+            }
+            crate::ImageSource::Gray(img) => {
+                contiguous_gray = img.to_contiguous_buf().0;
+                (contiguous_gray.as_bytes(), 1)
+            }
             #[cfg(target_arch = "wasm32")]
             crate::ImageSource::HtmlImageElement(element) => {
                 let size = data.dimensions();
@@ -1907,6 +1919,18 @@ impl<'a> RenderPassBuilder<'a> {
     }
 }
 
+fn stage_uniforms(current: &mut Option<UniformArray>, staging: &mut Vec<u8>, stride: u64, uniforms: UniformArray) -> u32 {
+    let same_bits = current.as_ref().is_some_and(|previous| previous.as_slice().iter()
+        .zip(uniforms.as_slice()).all(|(left, right)| left.to_bits() == right.to_bits()));
+    if !same_bits {
+        let end = staging.len() + stride as usize;
+        staging.extend_from_slice(bytemuck::cast_slice(uniforms.as_slice()));
+        staging.resize(end, 0);
+        *current = Some(uniforms);
+    }
+    (staging.len() - stride as usize) as u32
+}
+
 struct CommandToPipelineAndBindGroupMapper {
     device: wgpu::Device,
     empty_texture_view: wgpu::TextureView,
@@ -1994,15 +2018,7 @@ impl CommandToPipelineAndBindGroupMapper {
         }
 
         let uniforms = UniformArray::from(params);
-        if self.current_uniforms.as_ref() != Some(&uniforms) {
-            let end = self.uniform_staging.len() + self.uniform_stride as usize;
-            self.uniform_staging
-                .extend_from_slice(bytemuck::cast_slice(uniforms.as_slice()));
-            self.uniform_staging.resize(end, 0);
-            self.current_uniforms = Some(uniforms);
-        }
-        // The current command's slot is the last one staged.
-        let offset = (self.uniform_staging.len() - self.uniform_stride as usize) as u32;
+        let offset = stage_uniforms(&mut self.current_uniforms, &mut self.uniform_staging, self.uniform_stride, uniforms);
         if bind_group_changed || render_pass_builder.current_bound_offset != Some(offset) {
             render_pass.set_bind_group(1, self.current_bind_group.as_ref().unwrap(), &[offset]);
             render_pass_builder.current_bound_offset = Some(offset);
