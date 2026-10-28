@@ -53,10 +53,12 @@ export component Rise inherits Rectangle {
     in property <length> lift: 12px;
     in property <bool> paged: true;
     in property <float> fade: 1;
+    in property <bool> settled: false;
     out property <float> v: rise-intro.v * root.fade * (root.paged ? Theme.page-a : 1);
     out property <float> hide: 1 - rise-intro.v;
     rise-intro := Intro {
         order: root.order;
+        done: root.settled;
     }
 
     Rectangle {

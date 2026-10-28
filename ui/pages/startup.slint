@@ -1,16 +1,14 @@
 import { Theme, T, AppState, StartItem } from "../theme.slint";
-import { Glass, Chip, Pill, SecondaryButton, IconButton, Toggle, ListGroup, ProgressStrip, SegTabs } from "../widgets.slint";
+import { Glass, Chip, Pill, SecondaryButton, IconButton, Toggle, VirtualList, ProgressStrip, SegTabs } from "../widgets.slint";
 import { PageFrame, PageHead, EmptyState } from "common.slint";
 import { Intro, Rise } from "../motion.slint";
 
 component StartRow inherits Rise {
     in property <StartItem> item;
     in property <bool> last: false;
-    in property <bool> shown: true;
     callback toggled(bool);
     callback removed;
     height: 58px;
-    visible: shown;
 
     if !root.last: Rectangle {
         x: 68px;
@@ -142,19 +140,22 @@ export component StartupPage inherits PageFrame {
         }
         Rectangle {
             vertical-stretch: 1;
-            if AppState.startups.length > 0: lg := ListGroup {
-                limit: parent.height;
-                width: parent.width;
-                for item[i] in AppState.startups: StartRow {
-                    order: i;
-                    shown: self.absolute-position.y + self.height > lg.absolute-position.y && self.absolute-position.y < lg.absolute-position.y + lg.height;
-                    item: item;
-                    last: i == AppState.startups.length - 1;
-                    toggled(v) => {
-                        AppState.toggle-start(item.idx, v);
-                    }
-                    removed => {
-                        AppState.delete-start(item.idx);
+            if AppState.startups.length > 0: Rectangle {
+                for e in AppState.startups-epoch: vl := VirtualList {
+                    length: AppState.startups.length;
+                    row-height: 58px;
+                    for k in vl.count: StartRow {
+                        y: (vl.first + k) * 58px;
+                        order: k;
+                        settled: vl.settled;
+                        item: AppState.startups[vl.first + k];
+                        last: vl.first + k == AppState.startups.length - 1;
+                        toggled(v) => {
+                            AppState.toggle-start(self.item.idx, v);
+                        }
+                        removed => {
+                            AppState.delete-start(self.item.idx);
+                        }
                     }
                 }
             }

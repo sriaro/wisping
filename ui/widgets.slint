@@ -490,10 +490,52 @@ export component ListGroup inherits Rectangle {
     }
 }
 
+export component VirtualList inherits Rectangle {
+    in property <int> length: 0;
+    in property <length> row-height: 56px;
+    out property <int> count: 0;
+    out property <int> first: max(0, min(floor(lg.scroll-y / root.row-height), root.length - root.count));
+    out property <bool> settled: false;
+    property <int> want: min(root.length, ceil(root.height / root.row-height) + 2);
+
+    init => {
+        self.count = self.want;
+    }
+
+    changed want => {
+        self.count = self.want;
+    }
+
+    Timer {
+        interval: 1400ms;
+        running: !root.settled;
+        triggered => {
+            root.settled = true;
+        }
+    }
+
+    lg := ListGroup {
+        limit: root.height;
+        width: root.width;
+        Rectangle {
+            height: root.length * root.row-height;
+            @children
+        }
+    }
+}
+
 export component ProgressStrip inherits Rectangle {
     in property <bool> active: false;
     in property <float> fade: Theme.page-a;
+    property <float> phase: 0;
     height: 3px;
+    Timer {
+        interval: 33ms;
+        running: root.active;
+        triggered => {
+            root.phase = mod(root.phase + 0.0254, 1);
+        }
+    }
     Rectangle {
         border-radius: 2px;
         background: (root.active ? Theme.ring-track : transparent).transparentize(1 - root.fade);
@@ -507,7 +549,7 @@ export component ProgressStrip inherits Rectangle {
             height: root.height;
             border-radius: 2px;
             background: Theme.accent;
-            x: -self.width + (root.width + self.width) * mod(animation-tick() / 1.3s, 1);
+            x: -self.width + (root.width + self.width) * root.phase;
         }
     }
 }
@@ -519,11 +561,20 @@ export component HeroRing inherits Rectangle {
     in property <float> fade: Theme.page-a;
     width: 176px;
     height: 176px;
-    property <angle> a0: mod(animation-tick() / 1.2s, 1) * 360deg;
+    property <float> spin: 0;
+    property <angle> a0: root.spin * 360deg;
     property <float> full: root.mode == 2 ? 1 : 0;
     property <float> arc: root.mode == 1 ? 1 : 0;
     animate full { duration: 360ms; easing: ease-out; }
     animate arc { duration: 260ms; easing: ease-out; }
+
+    Timer {
+        interval: 33ms;
+        running: root.mode == 1;
+        triggered => {
+            root.spin = mod(root.spin + 0.0275, 1);
+        }
+    }
 
     Rectangle {
         width: 100%;

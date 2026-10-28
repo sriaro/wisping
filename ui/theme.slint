@@ -36,7 +36,6 @@ export global Theme {
         : @linear-gradient(180deg, #ffffffe0 0%, #ffffff80 100%);
     out property <color> card-border: dark ? #ffffff22 : #ffffffe8;
     out property <color> card-border-hot: dark ? #5b8fe088 : #2f7bf580;
-    out property <color> sheen-top: dark ? #ffffff10 : #ffffff90;
     out property <color> glow: dark ? #2a58c038 : #2f6ff030;
     out property <color> shadow: dark ? #00000040 : #1a2a5020;
     out property <color> text: dark ? #eff3fa : #141b2b;
@@ -45,9 +44,6 @@ export global Theme {
     out property <brush> accent-gradient: dark
         ? @linear-gradient(135deg, #12857c 0%, #2c58c4 100%)
         : @linear-gradient(135deg, #17bfb2 0%, #2f6ff0 100%);
-    out property <brush> ring-brush: dark
-        ? @linear-gradient(135deg, #2a9a90 0%, #4d82d6 100%)
-        : @linear-gradient(135deg, #22d3c2 0%, #2f6ff0 100%);
     out property <color> accent-soft: dark ? #5b8fe025 : #2f6ff01f;
     out property <color> nav-active: dark ? #5b8fe025 : #2f6ff020;
     out property <color> sep: dark ? #ffffff14 : #1420401a;
@@ -63,7 +59,6 @@ export global Theme {
     out property <color> warn-soft: dark ? #fbbf2426 : #f59e0b26;
     out property <color> ok: dark ? #3dbb8a : #037a56;
     out property <color> ok-soft: dark ? #34d39926 : #10b98122;
-    out property <color> toast-bg: dark ? #eef2f9f2 : #162033f2;
     out property <color> toast-text: dark ? #101828 : #ffffff;
     out property <color> scrim: dark ? #000000a6 : #10182866;
     out property <color> dialog-bg: dark ? #171f30f2 : #fffffff7;
@@ -217,12 +212,14 @@ export global AppState {
     in-out property <bool> can-run-clean: false;
 
     in-out property <[IssueItem]> issues: [];
+    in-out property <[int]> issues-epoch: [0];
     in-out property <bool> reg-scanned: false;
     in-out property <string> reg-count-text;
     in-out property <string> reg-selected-text;
     in-out property <bool> can-fix: false;
 
     in-out property <[StartItem]> startups: [];
+    in-out property <[int]> startups-epoch: [0];
     in-out property <string> start-count-text;
     in-out property <int> start-tab: 0;
     in-out property <[string]> start-tab-names: [];
@@ -248,6 +245,7 @@ export global AppState {
     in-out property <int> details-tint: 1;
     in-out property <string> details-total;
     in-out property <[DetailRow]> details-rows: [];
+    in-out property <[int]> details-epoch: [0];
     callback show-details(int);
     callback close-details();
     callback open-location(string);

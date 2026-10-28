@@ -112,7 +112,7 @@ fn kind_code(k: Kind) -> i32 {
     }
 }
 
-const MIN_TILE: f64 = 6.0;
+const MIN_TILE: f64 = 8.0;
 
 struct MapCtx<'a> {
     tree: &'a Tree,
@@ -124,7 +124,7 @@ struct MapCtx<'a> {
 impl MapCtx<'_> {
     fn fill(&mut self, node: u32, rect: treemap::Rect, depth: usize) {
         let tree = self.tree;
-        let limit = if depth == 0 { MAX_TILES } else { 28 };
+        let limit = if depth == 0 { MAX_TILES } else { 20 };
         let kids: Vec<u32> = tree.sorted_children(node).into_iter().filter(|&c| tree.nodes[c as usize].size > 0).collect();
         let shown = kids.len().min(limit);
         let mut sizes: Vec<u64> = kids[..shown].iter().map(|&c| tree.nodes[c as usize].size).collect();
@@ -160,7 +160,7 @@ impl MapCtx<'_> {
                 nested: false,
             });
             let is_dir = idx >= 0 && tree.nodes[idx as usize].kind == Kind::Dir;
-            if is_dir && depth < 3 && abs.w > 120.0 && abs.h > 76.0 && self.tiles.len() < 900 {
+            if is_dir && depth < 3 && abs.w > 120.0 && abs.h > 76.0 && self.tiles.len() < 450 {
                 let inner = treemap::Rect { x: abs.x + 4.0, y: abs.y + 22.0, w: abs.w - 8.0, h: abs.h - 26.0 };
                 self.fill(idx as u32, inner, depth + 1);
                 if self.tiles.len() > slot + 1 {

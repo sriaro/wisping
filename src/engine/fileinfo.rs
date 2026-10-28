@@ -106,9 +106,83 @@ pub(super) fn admin_only(path: &Path) -> bool {
     program_dirs().iter().any(|d| inside(path, d))
 }
 
+const CACHE_FILE: &str = "publishers.txt";
+const CACHE_LIMIT: usize = 4096;
+const CACHE_BYTES: u64 = 2 * 1024 * 1024;
+const NAME_MAX: usize = 512;
+const PATH_MAX: usize = 4096;
+
+type Stamp = (u64, u64, String);
+
+struct Cache {
+    map: HashMap<String, Stamp>,
+    dirty: bool,
+}
+
+fn cache() -> &'static Mutex<Cache> {
+    static CACHE: OnceLock<Mutex<Cache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(Cache { map: load_cache(), dirty: false }))
+}
+
+fn store_trusted() -> bool {
+    !super::sys::is_admin() || (super::sys::shell_user_is_self() && super::fsx::PinnedDir::open(super::data::root()).is_ok_and(|dir| dir.is_private()))
+}
+
+fn load_cache() -> HashMap<String, Stamp> {
+    if !store_trusted() {
+        return HashMap::new();
+    }
+    super::data::read_text(&super::data::root().join(CACHE_FILE), CACHE_BYTES).map(|text| parse_cache(&text)).unwrap_or_default()
+}
+
+fn plain(text: &str, max: usize) -> bool {
+    text.len() <= max && !text.chars().any(char::is_control)
+}
+
+fn parse_cache(text: &str) -> HashMap<String, Stamp> {
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let mut parts = line.splitn(4, '\t');
+        let (Some(time), Some(size), Some(name), Some(path)) = (parts.next(), parts.next(), parts.next(), parts.next()) else { continue };
+        let (Ok(time), Ok(size)) = (time.parse::<u64>(), size.parse::<u64>()) else { continue };
+        if path.is_empty() || !plain(path, PATH_MAX) || !plain(name, NAME_MAX) || !Path::new(path).is_absolute() || !super::fsx::local_drive_path(path) {
+            continue;
+        }
+        if map.len() >= CACHE_LIMIT {
+            break;
+        }
+        map.insert(path.to_lowercase(), (time, size, name.to_string()));
+    }
+    map
+}
+
+fn render_cache(map: &HashMap<String, Stamp>) -> String {
+    let mut lines: Vec<String> = map
+        .iter()
+        .filter(|(path, (_, _, name))| plain(path, PATH_MAX) && plain(name, NAME_MAX))
+        .map(|(path, (time, size, name))| format!("{time}\t{size}\t{name}\t{path}\n"))
+        .collect();
+    lines.sort();
+    lines.concat()
+}
+
+pub fn persist() {
+    let mut guard = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !guard.dirty {
+        return;
+    }
+    guard.dirty = false;
+    if !store_trusted() {
+        return;
+    }
+    let text = render_cache(&guard.map);
+    drop(guard);
+    super::data::ensure_root();
+    let _ = super::fsx::PinnedDir::create(super::data::root()).and_then(|dir| dir.write_file(CACHE_FILE.as_ref(), text.as_bytes()));
+}
+
 pub fn publisher(path: &str) -> String {
     use std::os::windows::fs::MetadataExt;
-    static CACHE: OnceLock<Mutex<HashMap<String, (u64, u64, String)>>> = OnceLock::new();
     if !super::fsx::local_drive_path(path) {
         return String::new();
     }
@@ -117,17 +191,21 @@ pub fn publisher(path: &str) -> String {
         return String::new();
     };
     let stamp = (meta.last_write_time(), meta.len());
-    let cache = CACHE.get_or_init(Default::default);
+    let cache = cache();
     let key = path.to_lowercase();
-    if let Some((time, size, v)) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&key)
+    if let Some((time, size, v)) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).map.get(&key)
         && (*time, *size) == stamp {
             return v.clone();
     }
     let value = if admin_only(p) { company(p) } else { signer(p).unwrap_or_default() };
     let mut cached = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if cached.len() >= 4096 {
-        cached.clear();
+    if cached.map.len() >= CACHE_LIMIT {
+        cached.map.clear();
     }
-    cached.insert(key, (stamp.0, stamp.1, value.clone()));
+    cached.map.insert(key, (stamp.0, stamp.1, value.clone()));
+    cached.dirty = true;
     value
 }
+
+#[cfg(test)]
+mod tests;

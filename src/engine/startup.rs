@@ -97,6 +97,7 @@ pub fn list() -> Vec<StartupEntry> {
         }
         all
     });
+    fileinfo::persist();
     out.sort_by_key(|e| (e.kind.group(), e.name.to_lowercase()));
     out
 }

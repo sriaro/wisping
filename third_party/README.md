@@ -9,3 +9,5 @@ femtovg anti-aliasing: the edge fringe is one device pixel wide at every scale. 
 Nine-slice images (the shadows) are drawn without edge anti-aliasing. Each slice was drawn as its own anti-aliased rectangle, so the soft edges of neighbouring slices overlapped and left faint dark hairlines inside every card.
 
 Licences: femtovg is MIT or Apache-2.0 (LICENSE-MIT, LICENSE-APACHE in its folder). i-slint-renderer-femtovg is GPL-3.0-only or the Slint royalty-free or commercial licences (LICENSES in its folder); Wisping uses it under GPL-3.0-only.
+
+Both copies carry only what the build needs. femtovg's book, examples, tests, lockfile and the registry packaging files (Cargo.toml.orig) are left out, and both manifests keep only the library target and its dependencies.

@@ -184,6 +184,7 @@ pub fn fill_details(ui: &MainWindow, rows: &[cleaner::Detail]) {
     st.set_details_total(if bytes > 0 { data::format_size(bytes) } else { String::new() }.into());
     st.set_details_sub(sub.as_str().into());
     st.set_details_rows(ModelRc::new(VecModel::from(items)));
+    st.set_details_epoch(bump(&st.get_details_epoch()));
     st.set_details_loading(false);
 }
 
@@ -285,6 +286,7 @@ pub fn push_issues(ui: &MainWindow, core: &Core) {
     let st = ui.global::<AppState>();
     if let Some(m) = sync_model(&st.get_issues(), items) {
         st.set_issues(m);
+        st.set_issues_epoch(bump(&st.get_issues_epoch()));
     }
     st.set_reg_scanned(core.reg_scanned);
     push_reg_summary(ui, core);
@@ -317,6 +319,7 @@ pub fn push_startups(ui: &MainWindow, core: &Core) {
     st.set_start_sub(i18n::get(&format!("start.sub.{}", tab)).into());
     if let Some(m) = sync_model(&st.get_startups(), items) {
         st.set_startups(m);
+        st.set_startups_epoch(bump(&st.get_startups_epoch()));
     }
     let safe = core.startups.iter().filter(|e| shown(e) && e.enabled && classify::classify(e).1 == classify::Advice::Safe && !e.policy).count();
     let key = if safe > 0 { "start.count.safe" } else { "start.count" };
@@ -423,5 +426,14 @@ pub fn set_row<M: Clone + 'static>(model: ModelRc<M>, i: usize, edit: impl FnOnc
         edit(&mut row);
         model.set_row_data(i, row);
     }
+}
+
+pub fn bump(model: &ModelRc<i32>) -> ModelRc<i32> {
+    ModelRc::new(VecModel::from(vec![model.row_data(0).unwrap_or(0).wrapping_add(1)]))
+}
+
+pub fn reset_startups(ui: &MainWindow) {
+    let st = ui.global::<AppState>();
+    st.set_startups_epoch(bump(&st.get_startups_epoch()));
 }
 

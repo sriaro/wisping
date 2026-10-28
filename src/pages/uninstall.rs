@@ -58,6 +58,7 @@ fn push(ui: &MainWindow) {
         st.set_sort(s.sort);
         if let Some(model) = crate::views::sync_model(&st.get_programs(), items) {
             st.set_programs(model);
+            st.set_programs_epoch(crate::views::bump(&st.get_programs_epoch()));
         }
     });
 }

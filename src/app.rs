@@ -18,7 +18,7 @@ use crate::engine::sys;
 use crate::i18n;
 use crate::winui;
 use crate::motion::{begin_switch, crossfade, switch_language};
-use crate::views::{fill_details, set_row, cat_style, issue_locked, lock_issues, ltr, push_all, push_clean_summary, push_home, push_issues, push_reg_summary, push_startups};
+use crate::views::{fill_details, set_row, cat_style, issue_locked, lock_issues, ltr, push_all, push_clean_summary, push_home, push_issues, push_reg_summary, push_startups, reset_startups};
 use crate::{AppState, MainWindow, T, Theme};
 
 static DETAILS_STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
@@ -708,6 +708,7 @@ pub fn setup(ui: &MainWindow) {
             let Some(ui) = c.weak.upgrade() else { return };
             ui.global::<AppState>().set_start_tab(tab);
             push_startups(&ui, &c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            reset_startups(&ui);
         }
     });
     st.on_set_show_system({
@@ -716,6 +717,7 @@ pub fn setup(ui: &MainWindow) {
             let Some(ui) = c.weak.upgrade() else { return };
             ui.global::<AppState>().set_start_show_system(on);
             push_startups(&ui, &c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            reset_startups(&ui);
         }
     });
     st.on_select_safe({

@@ -1,15 +1,13 @@
 import { Theme, T, AppState, IssueItem } from "../theme.slint";
-import { Glass, Pill, PrimaryButton, SecondaryButton, RoundCheck, ListGroup, ProgressStrip } from "../widgets.slint";
+import { Glass, Pill, PrimaryButton, SecondaryButton, RoundCheck, VirtualList, ProgressStrip } from "../widgets.slint";
 import { PageFrame, PageHead, EmptyState } from "common.slint";
 import { Intro, Rise } from "../motion.slint";
 
 component IssueRow inherits Rise {
     in property <IssueItem> item;
     in property <bool> last: false;
-    in property <bool> shown: true;
     callback activated;
     height: 56px;
-    visible: shown;
 
     Rectangle {
         x: 6px;
@@ -94,16 +92,19 @@ export component RegistryPage inherits PageFrame {
         }
         Rectangle {
             vertical-stretch: 1;
-            if AppState.issues.length > 0: lg := ListGroup {
-                limit: parent.height;
-                width: parent.width;
-                for item[i] in AppState.issues: IssueRow {
-                    order: i;
-                    shown: self.absolute-position.y + self.height > lg.absolute-position.y && self.absolute-position.y < lg.absolute-position.y + lg.height;
-                    item: item;
-                    last: i == AppState.issues.length - 1;
-                    activated => {
-                        AppState.toggle-issue(i);
+            if AppState.issues.length > 0: Rectangle {
+                for e in AppState.issues-epoch: vl := VirtualList {
+                    length: AppState.issues.length;
+                    row-height: 56px;
+                    for k in vl.count: IssueRow {
+                        y: (vl.first + k) * 56px;
+                        order: k;
+                        settled: vl.settled;
+                        item: AppState.issues[vl.first + k];
+                        last: vl.first + k == AppState.issues.length - 1;
+                        activated => {
+                            AppState.toggle-issue(vl.first + k);
+                        }
                     }
                 }
             }

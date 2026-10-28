@@ -1,5 +1,5 @@
 import { Theme, T } from "../theme.slint";
-import { Glass, Chip, SecondaryButton, IconButton, ListGroup, ProgressStrip, SegTabs, SearchBox } from "../widgets.slint";
+import { Glass, Chip, SecondaryButton, IconButton, VirtualList, ProgressStrip, SegTabs, SearchBox } from "../widgets.slint";
 import { PageFrame, PageHead, EmptyState } from "common.slint";
 import { Intro, Rise } from "../motion.slint";
 
@@ -15,6 +15,7 @@ export struct ProgItem {
 
 export global UninstallState {
     in-out property <[ProgItem]> programs: [];
+    in-out property <[int]> programs-epoch: [0];
     in-out property <string> count-text;
     in-out property <int> sort: 0;
     in-out property <bool> loading: false;
@@ -28,9 +29,7 @@ export global UninstallState {
 component ProgRow inherits Rise {
     in property <ProgItem> item;
     in property <bool> last: false;
-    in property <bool> shown: true;
     height: 58px;
-    visible: shown;
 
     if !root.last: Rectangle {
         x: 68px;
@@ -138,14 +137,17 @@ export component UninstallPage inherits PageFrame {
         }
         Rectangle {
             vertical-stretch: 1;
-            if UninstallState.programs.length > 0: lg := ListGroup {
-                limit: parent.height;
-                width: parent.width;
-                for item[i] in UninstallState.programs: ProgRow {
-                    order: i;
-                    shown: self.absolute-position.y + self.height > lg.absolute-position.y && self.absolute-position.y < lg.absolute-position.y + lg.height;
-                    item: item;
-                    last: i == UninstallState.programs.length - 1;
+            if UninstallState.programs.length > 0: Rectangle {
+                for e in UninstallState.programs-epoch: vl := VirtualList {
+                    length: UninstallState.programs.length;
+                    row-height: 58px;
+                    for k in vl.count: ProgRow {
+                        y: (vl.first + k) * 58px;
+                        order: k;
+                        settled: vl.settled;
+                        item: UninstallState.programs[vl.first + k];
+                        last: vl.first + k == UninstallState.programs.length - 1;
+                    }
                 }
             }
             if UninstallState.programs.length == 0: EmptyState {

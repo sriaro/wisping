@@ -16,9 +16,7 @@ export { Theme, T, Geo, AppState, CatItem, IssueItem, StartItem, DetailRow, Unin
 component DetailLine inherits Rise {
     paged: false;
     in property <DetailRow> item;
-    in property <bool> shown: true;
     height: 60px;
-    visible: shown;
 
     Rectangle {
         y: 3px;
@@ -643,15 +641,27 @@ export component MainWindow inherits Window {
                 Rectangle {
                     height: 6px;
                 }
-                Rectangle {
+                detail-box := Rectangle {
                     vertical-stretch: 1;
-                    ds := Scroller {
+                    property <int> want: min(AppState.details-rows.length, ceil(self.height / 60px) + 2);
+                    property <int> count: 0;
+                    init => {
+                        self.count = self.want;
+                    }
+                    changed want => {
+                        self.count = self.want;
+                    }
+                    for e in AppState.details-epoch: ds := Scroller {
+                        property <int> first: max(0, min(floor(self.scroll-y / 60px), AppState.details-rows.length - detail-box.count));
                         width: parent.width;
                         height: parent.height;
-                        for r[i] in AppState.details-rows: DetailLine {
-                            order: i;
-                            shown: self.absolute-position.y + self.height > ds.absolute-position.y && self.absolute-position.y < ds.absolute-position.y + ds.height;
-                            item: r;
+                        Rectangle {
+                            height: AppState.details-rows.length * 60px;
+                            for k in detail-box.count: DetailLine {
+                                y: (ds.first + k) * 60px;
+                                order: k;
+                                item: AppState.details-rows[ds.first + k];
+                            }
                         }
                     }
                     if AppState.details-loading: Text {
