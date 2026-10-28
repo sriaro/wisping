@@ -43,6 +43,8 @@ Copyright (C) 2026 sriaro.
 
 Wisping is free software under the GNU General Public License, version 3 only (GPL-3.0-only). See [LICENSE](LICENSE).
 
+Wisping also carries an additional term under section 7(b) of the GPL: whoever copies, modifies or distributes it must keep the copyright notice and the author attribution "sriaro" in the source, the documentation and the legal notices, and must mark modified versions as modified. See [NOTICE](NOTICE).
+
 Wisping is built with Slint, which is offered under the GPL-3.0-only, a royalty-free licence or a commercial licence; Wisping uses it under the GPL-3.0-only, so the whole program is under the GPL. The femtovg canvas (MIT or Apache-2.0) and Slint's femtovg renderer are built from modified copies in `third_party/` (see [third_party/README.md](third_party/README.md)), which keep their licence files. The icons in `ui/icons` are drawn from Lucide (ISC). All other dependencies use permissive licences such as MIT, Apache-2.0, BSD, Zlib, ISC or CC0. The notices of every linked package are in [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt).
 
 This repository is the complete source code of the program.
