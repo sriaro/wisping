@@ -6,6 +6,8 @@ rust-version = "1.99"
 publish = false
 license = "GPL-3.0-only"
 authors = ["sriaro"]
+description = "Cleaner, startup, programs and disk usage tool for Windows"
+repository = "https://github.com/sriaro/wisping"
 
 [[bin]]
 name = "Wisping"
