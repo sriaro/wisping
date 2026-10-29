@@ -15,6 +15,7 @@ use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use super::data;
 use super::fsx;
 use super::registry;
+use super::tasks::decode;
 
 const HEADER: &str = "Windows Registry Editor Version 5.00";
 
@@ -312,15 +313,6 @@ fn reg_files(dir: &Path) -> Vec<PathBuf> {
         .unwrap_or_default();
     files.sort();
     files
-}
-
-fn decode(bytes: &[u8]) -> String {
-    if bytes.starts_with(&[0xFF, 0xFE]) {
-        let units: Vec<u16> = bytes[2..].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-        String::from_utf16_lossy(&units)
-    } else {
-        String::from_utf8_lossy(bytes).to_string()
-    }
 }
 
 fn key_of(file: &Path) -> Option<String> {

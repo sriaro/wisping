@@ -4,6 +4,7 @@ use super::{data, fsx};
 
 const FILE: &str = "settings.txt";
 const STATE: &str = "state.txt";
+const CLEAN: &str = "clean.txt";
 
 static LOG: AtomicBool = AtomicBool::new(false);
 static REMEMBER: AtomicBool = AtomicBool::new(false);
@@ -144,4 +145,15 @@ pub fn save_state(state: WindowState) {
     let text = format!("page={}\r\nwidth={}\r\nheight={}\r\n", state.page, state.width, state.height);
     data::ensure_root();
     let _ = fsx::write_file(&data::root().join(STATE), text.as_bytes());
+}
+
+pub fn save_clean_list(ids: &[&str]) {
+    data::write_setting(CLEAN, &ids.join("\r\n"));
+}
+
+pub fn clean_list() -> Option<Vec<String>> {
+    if !remember_on() {
+        return None;
+    }
+    data::read_setting(CLEAN).map(|text| text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
 }

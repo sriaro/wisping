@@ -14,6 +14,7 @@ use winreg::enums::*;
 
 use super::data;
 use super::fsx::{self, Fence, Mask, Removal};
+use super::lock::LockExt;
 use super::registry;
 use super::sys;
 
@@ -57,6 +58,7 @@ pub struct CleanTarget {
     pub needs_admin: bool,
     pub selected: bool,
     pub recycle: bool,
+    pub shortcuts: bool,
     pub sources: Vec<Source>,
     pub reg: Vec<String>,
     pub removed: u64,
@@ -252,7 +254,7 @@ fn steam_dir() -> Option<String> {
 pub fn group_of(id: &str) -> &'static str {
     match id {
         "chrome" | "edge" | "brave" | "otherbrowsers" | "firefox" | "history" | "cookies" | "sessions" | "metrics" | "iecache" | "iedata" => "browsers",
-        "steam" | "onedrive" | "nvidia" | "winrar" | "devcache" | "appcache" | "office" => "apps",
+        "steam" | "launchers" | "onedrive" | "nvidia" | "winrar" | "devcache" | "appcache" | "office" | "adobe" => "apps",
         "aiapps" | "aicli" | "aigpu" | "aimodelcache" | "aihistory" | "aimodels" => "ai",
         _ => "windows",
     }
@@ -270,18 +272,72 @@ fn group_rank(id: &str) -> u8 {
 pub fn risk_of(id: &str) -> u8 {
     match id {
         "recycle" | "aihistory" | "aimodels" => 2,
-        "recent" | "shader" | "wu" | "logs" | "history" | "cookies" | "sessions" | "iedata" | "explorer" | "wintools" | "rdp" | "winrar" | "steam" | "prefetch" | "aicli" | "aimodelcache" | "devcache" | "office" => 1,
+        "recent" | "shortcuts" | "shader" | "wu" | "logs" | "history" | "cookies" | "sessions" | "iedata" | "explorer" | "wintools" | "rdp" | "winrar" | "steam" | "prefetch" | "aicli" | "aimodelcache" | "devcache" | "office" | "adobe" => 1,
         _ => 0,
     }
 }
 
-const APP_ROOTS: [&str; 5] = [
+const APP_ROOTS: [&str; 13] = [
     "%APPDATA%\\Code",
     "%APPDATA%\\discord",
     "%APPDATA%\\Microsoft\\Teams",
     "%LOCALAPPDATA%\\Packages\\MSTeams_8wekyb3d8bbwe\\LocalCache\\Microsoft\\MSTeams\\EBWebView\\*",
     "%APPDATA%\\Slack",
+    "%LOCALAPPDATA%\\Spotify\\Browser",
+    "%LOCALAPPDATA%\\Packages\\SpotifyAB.SpotifyMusic_zpdnekdrzrea0\\LocalCache\\Spotify\\Browser",
+    "%APPDATA%\\Notion",
+    "%APPDATA%\\obsidian",
+    "%APPDATA%\\Figma",
+    "%APPDATA%\\Postman",
+    "%APPDATA%\\GitHub Desktop",
+    "%APPDATA%\\Signal",
 ];
+
+const SHELL_FOLDERS: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders";
+
+fn shell_folder(hive: winreg::HKEY, value: &str, fallback: &str) -> String {
+    RegKey::predef(hive)
+        .open_subkey_with_flags(SHELL_FOLDERS, KEY_READ)
+        .and_then(|key| key.get_value::<String, _>(value))
+        .map(|raw| raw.trim().trim_matches('"').to_string())
+        .ok()
+        .filter(|raw| {
+            let full = fsx::expand_env(raw);
+            !full.contains('%') && fsx::local_drive_path(&full) && !fsx::is_protected(&full)
+        })
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+pub fn run_parallel(targets: &mut [CleanTarget], only: Option<&[usize]>, work: fn(&mut CleanTarget)) {
+    let jobs: Vec<usize> = match only {
+        Some(o) => o.to_vec(),
+        None => (0..targets.len()).collect(),
+    };
+    if jobs.is_empty() {
+        return;
+    }
+    let cells: Vec<Mutex<CleanTarget>> = jobs.iter().map(|&i| Mutex::new(std::mem::take(&mut targets[i]))).collect();
+    let next = AtomicUsize::new(0);
+    let workers = cells.len().min(worker_count());
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            s.spawn(|| {
+                super::cpu::urgent();
+                loop {
+                    let k = next.fetch_add(1, Ordering::SeqCst);
+                    if k >= cells.len() {
+                        break;
+                    }
+                    let mut guard = cells[k].locked();
+                    work(&mut guard);
+                }
+            });
+        }
+    });
+    for (k, cell) in cells.into_iter().enumerate() {
+        targets[jobs[k]] = cell.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+}
 
 const DEV_CACHES: [&str; 9] = [
     "%LOCALAPPDATA%\\npm-cache",
@@ -337,6 +393,12 @@ pub fn targets() -> Vec<CleanTarget> {
     add(&mut l, i, "%APPDATA%\\Microsoft\\Windows\\Recent", "*.lnk", false, 0);
     add(&mut l, i, "%APPDATA%\\Microsoft\\Windows\\Recent\\AutomaticDestinations", "*", false, 0);
     add(&mut l, i, "%APPDATA%\\Microsoft\\Windows\\Recent\\CustomDestinations", "*", false, 0);
+    let i = make(&mut l, "shortcuts", false, false);
+    l[i].shortcuts = true;
+    add(&mut l, i, &shell_folder(HKEY_CURRENT_USER, "Desktop", "%USERPROFILE%\\Desktop"), "*.lnk", false, 0);
+    add(&mut l, i, &shell_folder(HKEY_CURRENT_USER, "Programs", "%APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs"), "*.lnk", true, 0);
+    add_admin(&mut l, i, &shell_folder(HKEY_LOCAL_MACHINE, "Common Desktop", "%PUBLIC%\\Desktop"), "*.lnk", false, 0);
+    add_admin(&mut l, i, &shell_folder(HKEY_LOCAL_MACHINE, "Common Programs", "%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs"), "*.lnk", true, 0);
     let i = make(&mut l, "crash", false, true);
     add(&mut l, i, "%LOCALAPPDATA%\\CrashDumps", "*", true, 0);
     add(&mut l, i, "%LOCALAPPDATA%\\Microsoft\\Windows\\WER\\ReportArchive", "*", true, 0);
@@ -458,6 +520,17 @@ pub fn targets() -> Vec<CleanTarget> {
             add(&mut l, i, &format!("{}\\{}", steam, n), "*", true, 0);
         }
     }
+    let i = make(&mut l, "launchers", false, false);
+    for n in ["Cache", "Code Cache", "GPUCache"] {
+        add(&mut l, i, &format!("%LOCALAPPDATA%\\EpicGamesLauncher\\Saved\\webcache*\\{}", n), "*", true, 0);
+    }
+    add(&mut l, i, "%LOCALAPPDATA%\\EpicGamesLauncher\\Saved\\Logs", "*.log", false, 0);
+    add(&mut l, i, "%LOCALAPPDATA%\\GOG.com\\Galaxy\\webcache", "*", true, 0);
+    add(&mut l, i, "%PROGRAMDATA%\\GOG.com\\Galaxy\\logs", "*", true, 0);
+    add(&mut l, i, "%PROGRAMDATA%\\Blizzard Entertainment\\Battle.net\\Cache", "*", true, 0);
+    add(&mut l, i, "%PROGRAMDATA%\\Battle.net\\Agent\\Logs", "*", true, 0);
+    add(&mut l, i, "%LOCALAPPDATA%\\Riot Games\\Riot Client\\Logs", "*", true, 0);
+    add(&mut l, i, "%LOCALAPPDATA%\\Ubisoft Game Launcher\\logs", "*", true, 0);
     let i = make(&mut l, "onedrive", false, false);
     add(&mut l, i, "%LOCALAPPDATA%\\Microsoft\\OneDrive\\logs", "*", true, 0);
     add(&mut l, i, "%LOCALAPPDATA%\\Microsoft\\OneDrive\\setup\\logs", "*", true, 0);
@@ -472,6 +545,10 @@ pub fn targets() -> Vec<CleanTarget> {
         add_reg(&mut l, i, k);
     }
     add(&mut l, i, "%APPDATA%\\Microsoft\\Office\\Recent", "*", false, 0);
+    let i = make(&mut l, "adobe", false, false);
+    for n in ["Media Cache Files", "Media Cache", "Peak Files"] {
+        add(&mut l, i, &format!("%APPDATA%\\Adobe\\Common\\{}", n), "*", true, 0);
+    }
     let i = make(&mut l, "devcache", false, false);
     for d in DEV_CACHES {
         add(&mut l, i, d, "*", true, 0);
@@ -482,6 +559,10 @@ pub fn targets() -> Vec<CleanTarget> {
             add(&mut l, i, &format!("{}\\{}", root, n), "*", true, 0);
         }
     }
+    for n in ["cache", "media_cache"] {
+        add(&mut l, i, &format!("%APPDATA%\\Telegram Desktop\\tdata\\user_data*\\{}", n), "*", true, 0);
+    }
+    add(&mut l, i, "%APPDATA%\\Zoom\\logs", "*", true, 0);
     let i = make(&mut l, "aiapps", false, true);
     for root in AI_APP_ROOTS {
         for n in AI_APP_CACHES {
@@ -621,8 +702,9 @@ pub fn scan(t: &mut CleanTarget) {
     }
     t.count += t.reg.iter().filter(|p| reg_path_ok(p)).map(|p| reg_entry_count(p)).sum::<u64>();
     let (plans, _) = plans(t, false);
-    let (tallies, _) = walk(&plans, false, &AtomicBool::new(false), |p, _, m, acc: &mut Tally| {
-        if p.age > 0 && fsx::too_new(fsx::newest(m), p.age) {
+    let only_broken = t.shortcuts;
+    let (tallies, _) = walk(&plans, false, &AtomicBool::new(false), |p, e, m, acc: &mut Tally| {
+        if p.age > 0 && fsx::too_new(fsx::newest(m), p.age) || only_broken && !super::shortcuts::broken(&e.path()) {
             return;
         }
         acc.bytes += m.len();
@@ -699,9 +781,14 @@ pub fn details_until(t: &CleanTarget, stop: &AtomicBool) -> Vec<Detail> {
         return vec![Detail { name: "Recycle Bin".to_string(), place: String::new(), bytes: t.bytes, count: t.count, path: "shell:RecycleBinFolder".to_string() }];
     }
     let (plans, _) = plans(t, false);
-    let depth = if t.id == "aimodels" { 2 } else { 1 };
+    let depth = match t.id.as_str() {
+        "aimodels" => 2,
+        "shortcuts" => 16,
+        _ => 1,
+    };
+    let only_broken = t.shortcuts;
     let (parts, _) = walk(&plans, false, stop, |p, e, m, acc: &mut Groups| {
-        if p.age > 0 && fsx::too_new(fsx::newest(m), p.age) {
+        if p.age > 0 && fsx::too_new(fsx::newest(m), p.age) || only_broken && !super::shortcuts::broken(&e.path()) {
             return;
         }
         let rel = match e.path().strip_prefix(&p.root) {
@@ -787,12 +874,13 @@ pub fn clean(t: &mut CleanTarget) {
     let (plans, refused) = plans(t, true);
     t.failed += refused.len() as u64;
     t.fail_samples.extend(refused.iter().take(8).map(|r| r.display().to_string()));
+    let only_broken = t.shortcuts;
     let (sweeps, dirs) = walk(&plans, true, &AtomicBool::new(false), |p, e, m, acc: &mut Sweep| {
         let Some(fence) = &p.fence else { return };
-        if p.age > 0 && fsx::too_new(fsx::newest(m), p.age) {
+        let path = e.path();
+        if p.age > 0 && fsx::too_new(fsx::newest(m), p.age) || only_broken && !super::shortcuts::broken(&path) {
             return;
         }
-        let path = e.path();
         match fsx::remove_inside(&path, fence, p.age, false) {
             Removal::Removed(n) => {
                 acc.freed += n;
@@ -965,7 +1053,7 @@ where
     let mut sub: Vec<PathBuf> = Vec::new();
     loop {
         let (plan, dir) = {
-            let mut q = w.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut q = w.queue.locked();
             loop {
                 if let Some(job) = q.jobs.pop() {
                     q.busy += 1;
@@ -974,7 +1062,7 @@ where
                 if q.busy == 0 {
                     drop(q);
                     w.ready.notify_all();
-                    w.results.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(acc);
+                    w.results.locked().push(acc);
                     return;
                 }
                 q.idle += 1;
@@ -986,10 +1074,10 @@ where
             list(&w.plans[plan], &dir, &mut sub, &mut acc, w.visit);
         }
         let grow = {
-            let mut q = w.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut q = w.queue.locked();
             q.busy -= 1;
             if let Some(d) = &w.dirs {
-                d.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(sub.iter().map(|x| (plan, x.clone())));
+                d.locked().extend(sub.iter().map(|x| (plan, x.clone())));
             }
             let added = !sub.is_empty();
             q.jobs.extend(sub.drain(..).map(|d| (plan, d)));

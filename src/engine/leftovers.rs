@@ -10,6 +10,7 @@ use windows::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOERRORUI, FOF_SIL
 use windows::core::PCWSTR;
 
 use super::fsx;
+use super::lock::LockExt;
 use super::programs;
 use super::regbackup::Hive;
 use super::registry;
@@ -58,11 +59,11 @@ pub struct Leftover {
 static TEST_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 pub fn set_test_root(dir: Option<PathBuf>) {
-    *TEST_ROOT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = dir;
+    *TEST_ROOT.locked() = dir;
 }
 
 fn test_root() -> Option<PathBuf> {
-    TEST_ROOT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    TEST_ROOT.locked().clone()
 }
 
 fn env_dir(name: &str) -> Option<PathBuf> {

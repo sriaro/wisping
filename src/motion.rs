@@ -4,6 +4,7 @@ use std::time::Duration;
 use slint::{ComponentHandle, Timer};
 
 use crate::app::{apply_fonts, enter_page, push_low_disk, Ctx};
+use crate::engine::lock::LockExt;
 use crate::views::push_all;
 use crate::i18n;
 use crate::{AppState, MainWindow, T, Theme};
@@ -143,7 +144,7 @@ fn swap_language(c: &Ctx, now: bool) {
     apply_fonts(&ui);
     let t = ui.global::<T>();
     t.set_rev(t.get_rev() + 1);
-    push_all(&ui, &c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    push_all(&ui, &c.core.locked());
     push_low_disk(&ui);
     if idle {
         ui.global::<AppState>().set_status(i18n::get("status.idle").into());

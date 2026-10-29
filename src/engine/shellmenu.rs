@@ -9,6 +9,7 @@ use super::fileinfo;
 use super::fsx;
 use super::regbackup::{self, Hive};
 use super::registry;
+use super::regscan::is_guid;
 use super::startup::{StartupEntry, StartupKind};
 
 const ROOTS: [(&str, &str); 6] = [
@@ -27,10 +28,6 @@ fn classes(hive: Hive) -> &'static str {
         Hive::Machine => "SOFTWARE\\Classes",
         Hive::User => "Software\\Classes",
     }
-}
-
-fn is_guid(text: &str) -> bool {
-    text.len() == 38 && text.starts_with('{') && text.ends_with('}')
 }
 
 pub(super) fn clsid_server(clsid: &str) -> Option<String> {

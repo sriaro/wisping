@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 
 use super::fsx;
+use super::lock::LockExt;
 
 pub const NONE: u32 = u32::MAX;
 pub const CATS: usize = 8;
@@ -220,7 +221,7 @@ fn first_link(path: &Path, linked: &Mutex<HashSet<u128>>) -> bool {
         return true;
     }
     let id = ((info.dwVolumeSerialNumber as u128) << 64) | ((info.nFileIndexHigh as u128) << 32) | info.nFileIndexLow as u128;
-    linked.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(id)
+    linked.locked().insert(id)
 }
 
 fn list_dir(path: &Path, progress: &Progress, linked: &Mutex<HashSet<u128>>) -> Option<Listing> {
@@ -272,7 +273,7 @@ fn small_label(count: u32) -> String {
 fn work(sh: &Shared) {
     loop {
         let task = {
-            let mut q = sh.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut q = sh.queue.locked();
             loop {
                 if sh.progress.cancel.load(Ordering::Relaxed) {
                     return;
@@ -288,49 +289,46 @@ fn work(sh: &Shared) {
         };
         let listing = list_dir(&task.path, sh.progress, &sh.linked);
         let mut next = Vec::new();
-        match listing {
-            Some(l) => {
-                let mut guard = sh.nodes.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                let (nodes, names) = &mut *guard;
-                let first = nodes.len() as u32;
-                nodes.reserve(l.dirs.len() + l.big.len() + 1);
-                for &(s, len) in &l.dirs {
-                    let (off, n) = names.push(l.name(s, len));
-                    nodes.push(blank(off, n, task.node, Kind::Dir));
-                }
-                for &(s, len, size) in &l.big {
-                    let (off, n) = names.push(l.name(s, len));
-                    let mut node = blank(off, n, task.node, Kind::File);
-                    node.size = size;
-                    node.files = 1;
-                    nodes.push(node);
-                }
-                if l.small_files > 0 {
-                    let (off, n) = names.push(&small_label(l.small_files));
-                    let mut node = blank(off, n, task.node, Kind::Small);
-                    node.size = l.small_bytes;
-                    node.files = l.small_files;
-                    nodes.push(node);
-                }
-                let count = nodes.len() as u32 - first;
-                let parent = &mut nodes[task.node as usize];
-                parent.first = first;
-                parent.count = count;
-                drop(guard);
-                next.reserve(l.dirs.len());
-                for (i, &(s, len)) in l.dirs.iter().enumerate() {
-                    next.push(Task { node: first + i as u32, path: task.path.join(l.name(s, len)) });
-                }
+        if let Some(l) = listing {
+            let mut guard = sh.nodes.locked();
+            let (nodes, names) = &mut *guard;
+            let first = nodes.len() as u32;
+            nodes.reserve(l.dirs.len() + l.big.len() + 1);
+            for &(s, len) in &l.dirs {
+                let (off, n) = names.push(l.name(s, len));
+                nodes.push(blank(off, n, task.node, Kind::Dir));
             }
-            None => {}
+            for &(s, len, size) in &l.big {
+                let (off, n) = names.push(l.name(s, len));
+                let mut node = blank(off, n, task.node, Kind::File);
+                node.size = size;
+                node.files = 1;
+                nodes.push(node);
+            }
+            if l.small_files > 0 {
+                let (off, n) = names.push(&small_label(l.small_files));
+                let mut node = blank(off, n, task.node, Kind::Small);
+                node.size = l.small_bytes;
+                node.files = l.small_files;
+                nodes.push(node);
+            }
+            let count = nodes.len() as u32 - first;
+            let parent = &mut nodes[task.node as usize];
+            parent.first = first;
+            parent.count = count;
+            drop(guard);
+            next.reserve(l.dirs.len());
+            for (i, &(s, len)) in l.dirs.iter().enumerate() {
+                next.push(Task { node: first + i as u32, path: task.path.join(l.name(s, len)) });
+            }
         }
         if !next.is_empty() {
             sh.pending.fetch_add(next.len(), Ordering::SeqCst);
-            sh.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).extend(next);
+            sh.queue.locked().extend(next);
             sh.cv.notify_all();
         }
         if sh.pending.fetch_sub(1, Ordering::SeqCst) == 1 {
-            let _guard = sh.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _guard = sh.queue.locked();
             sh.cv.notify_all();
         }
     }

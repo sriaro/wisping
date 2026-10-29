@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, FILE_FLAG_SEQUENTIAL_SCAN, GetFileInformationByHandle};
 
+use crate::engine::lock::LockExt;
 use super::{Kind, Tree};
 use crate::engine::fsx;
 
@@ -109,7 +110,7 @@ pub fn find(tree: &Tree, cancel: &AtomicBool) -> Vec<Group> {
                     let (size, ids) = &candidates[k];
                     for part in split(tree, ids, |p| partial_hash(p, *size, &mut buf)) {
                         for same in split(tree, &part, |p| full_hash(p, cancel, &mut buf).map(|h| (h, 0))) {
-                            out.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(Group { size: *size, members: same });
+                            out.locked().push(Group { size: *size, members: same });
                         }
                     }
                 }

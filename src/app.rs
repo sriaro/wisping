@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -10,6 +10,7 @@ use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel, Weak};
 
 use crate::engine::cleaner::{self, CleanTarget};
 use crate::engine::data;
+use crate::engine::lock::LockExt;
 use crate::engine::regbackup::Hive;
 use crate::engine::registry::{self, RegIssue};
 use crate::engine::report;
@@ -51,7 +52,9 @@ fn ctx() -> Ctx {
     CTX.with(|c| c.borrow().clone().expect("ui context"))
 }
 
-pub struct PanicReset(Option<(Weak<MainWindow>, Box<dyn FnOnce(&MainWindow) + Send>)>);
+type Reset = Box<dyn FnOnce(&MainWindow) + Send>;
+
+pub struct PanicReset(Option<(Weak<MainWindow>, Reset)>);
 
 impl Drop for PanicReset {
     fn drop(&mut self) {
@@ -140,37 +143,6 @@ pub fn show_error_in(ui: &MainWindow, text: String) {
     st.set_dialog_open(true);
 }
 
-fn run_parallel(targets: &mut [CleanTarget], only: Option<&[usize]>, work: fn(&mut CleanTarget)) {
-    let jobs: Vec<usize> = match only {
-        Some(o) => o.to_vec(),
-        None => (0..targets.len()).collect(),
-    };
-    if jobs.is_empty() {
-        return;
-    }
-    let cells: Vec<Mutex<CleanTarget>> = jobs.iter().map(|&i| Mutex::new(std::mem::take(&mut targets[i]))).collect();
-    let next = AtomicUsize::new(0);
-    let workers = cells.len().min(cleaner::worker_count());
-    std::thread::scope(|s| {
-        for _ in 0..workers {
-            s.spawn(|| {
-                crate::engine::cpu::urgent();
-                loop {
-                    let k = next.fetch_add(1, Ordering::SeqCst);
-                    if k >= cells.len() {
-                        break;
-                    }
-                    let mut guard = cells[k].lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                    work(&mut guard);
-                }
-            });
-        }
-    });
-    for (k, cell) in cells.into_iter().enumerate() {
-        targets[jobs[k]] = cell.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
-    }
-}
-
 fn start_scan(c: &Ctx, scope: Scope) {
     let Some(ui) = c.weak.upgrade() else { return };
     let st = ui.global::<AppState>();
@@ -198,9 +170,9 @@ fn start_scan(c: &Ctx, scope: Scope) {
         let start_job = (scope == Scope::All).then(|| std::thread::spawn(startup::list_cached));
         let mut failed = false;
         if scope != Scope::Registry {
-            let mut targets = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).targets.clone();
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_parallel(&mut targets, None, cleaner::scan))).is_ok() {
-                store_targets(&mut core.lock().unwrap_or_else(std::sync::PoisonError::into_inner), targets);
+            let mut targets = core.locked().targets.clone();
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cleaner::run_parallel(&mut targets, None, cleaner::scan))).is_ok() {
+                store_targets(&mut core.locked(), targets);
             } else {
                 failed = true;
             }
@@ -208,7 +180,7 @@ fn start_scan(c: &Ctx, scope: Scope) {
         if let Some(job) = reg_job {
             match job.join() {
                 Ok(issues) => {
-                    let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut g = core.locked();
                     g.issues = issues;
                     lock_issues(&mut g);
                     g.reg_scanned = true;
@@ -219,7 +191,7 @@ fn start_scan(c: &Ctx, scope: Scope) {
         if let Some(job) = start_job {
             match job.join() {
                 Ok(list) => {
-                    let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut g = core.locked();
                     g.startups = list;
                     g.all_scanned = true;
                 }
@@ -227,13 +199,13 @@ fn start_scan(c: &Ctx, scope: Scope) {
             }
         }
         if scope == Scope::Targets && !failed {
-            core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).all_scanned = true;
+            core.locked().all_scanned = true;
         }
         crate::engine::drives::refresh();
         let _ = weak.upgrade_in_event_loop(move |ui| {
             crate::winui::trim_soon();
             ui.global::<AppState>().set_busy(false);
-            push_all(&ui, &core.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            push_all(&ui, &core.locked());
             if failed {
                 show_error_in(&ui, i18n::get("msg.failed"));
             }
@@ -252,7 +224,7 @@ fn store_targets(g: &mut Core, mut fresh: Vec<CleanTarget>) {
 
 fn start_clean(c: &Ctx) {
     let (count, bytes, recycle) = {
-        let g = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let g = c.core.locked();
         let sel: Vec<&CleanTarget> = g.targets.iter().filter(|t| t.selected && !(t.needs_admin && !g.admin)).collect();
         (sel.len(), sel.iter().map(|t| t.bytes).sum::<u64>(), sel.iter().any(|t| t.recycle))
     };
@@ -295,14 +267,15 @@ fn run_clean(c: &Ctx) {
     std::thread::spawn(move || {
         let _reset = idle_on_panic(&weak);
         let (mut targets, admin) = {
-            let g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let g = core.locked();
             (g.targets.clone(), g.admin)
         };
         guard_with_restore_point(&weak, admin, "restore.desc.clean", "status.cleaning");
         let idx: Vec<usize> = (0..targets.len()).filter(|&i| targets[i].selected && !(targets[i].needs_admin && !admin)).collect();
+        crate::engine::settings::save_clean_list(&idx.iter().map(|&i| targets[i].id.as_str()).collect::<Vec<_>>());
         let before: Vec<CleanTarget> = idx.iter().map(|&i| targets[i].clone()).collect();
-        run_parallel(&mut targets, Some(&idx), cleaner::clean);
-        run_parallel(&mut targets, Some(&idx), cleaner::scan);
+        cleaner::run_parallel(&mut targets, Some(&idx), cleaner::clean);
+        cleaner::run_parallel(&mut targets, Some(&idx), cleaner::scan);
         let freed: u64 = idx.iter().map(|&i| targets[i].freed).sum();
         let failed: u64 = idx.iter().map(|&i| targets[i].failed).sum();
         let left: u64 = idx.iter().map(|&i| targets[i].bytes).sum();
@@ -311,7 +284,7 @@ fn run_clean(c: &Ctx) {
         let path = report::write_clean(&lines);
         drop(lines);
         {
-            let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut g = core.locked();
             store_targets(&mut g, targets);
             g.last_report = path;
         }
@@ -320,7 +293,7 @@ fn run_clean(c: &Ctx) {
             crate::winui::trim_soon();
             let st = ui.global::<AppState>();
             st.set_busy(false);
-            let g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let g = core.locked();
             st.set_has_report(g.last_report.is_some());
             push_all(&ui, &g);
             drop(g);
@@ -333,12 +306,12 @@ fn run_clean(c: &Ctx) {
 }
 
 fn start_fix(c: &Ctx) {
-    let count = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).issues.iter().filter(|i| i.selected).count();
+    let count = c.core.locked().issues.iter().filter(|i| i.selected).count();
     if count == 0 {
         toast(c, i18n::get("msg.nothing"));
         return;
     }
-    let risky = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).issues.iter().any(|i| i.selected && i.kind == "riskyleft");
+    let risky = c.core.locked().issues.iter().any(|i| i.selected && i.kind == "riskyleft");
     let c2 = c.clone();
     let text = if risky { format!("{}\n\n{}", i18n::get("confirm.fix.text"), i18n::get("confirm.fix.risky")) } else { i18n::get("confirm.fix.text") };
     confirm(c, i18n::fmt("confirm.fix.title", &[&count.to_string()]), text, i18n::get("confirm.fix.ok"), risky, Box::new(move || run_fix(&c2)));
@@ -371,15 +344,15 @@ fn run_fix(c: &Ctx) {
         };
         guard_with_restore_point(&weak, crate::engine::sys::is_admin(), "restore.desc.fix", "status.fixing");
         let chosen: Vec<RegIssue> = {
-            let g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let g = core.locked();
             g.issues.iter().filter(|i| i.selected && !issue_locked(i, g.admin)).cloned().collect()
         };
         let mut errors = Vec::new();
-        let old = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).issues.clone();
+        let old = core.locked().issues.clone();
         let (fixed, issues) = registry::fix_and_rescan(&old, &chosen, &backup, &mut errors);
         crate::engine::tools::remove_empty_backup(&backup);
         {
-            let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut g = core.locked();
             g.issues = issues;
             lock_issues(&mut g);
             g.reg_scanned = true;
@@ -389,7 +362,7 @@ fn run_fix(c: &Ctx) {
         let _ = weak.upgrade_in_event_loop(move |ui| {
             crate::winui::trim_soon();
             ui.global::<AppState>().set_busy(false);
-            push_all(&ui, &core.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            push_all(&ui, &core.locked());
             if errors.is_empty() {
                 toast(&ctx(), i18n::fmt("toast.fixed", &[&fixed.to_string(), &total.to_string()]));
             } else {
@@ -426,7 +399,7 @@ fn toggle_start(c: &Ctx, i: usize, value: bool) {
     if st.get_busy() {
         return;
     }
-    let Some(mut entry) = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).startups.get(i).cloned() else { return };
+    let Some(mut entry) = c.core.locked().startups.get(i).cloned() else { return };
     st.set_busy(true);
     st.set_status(i18n::get("status.applying").into());
     let core = c.core.clone();
@@ -436,7 +409,7 @@ fn toggle_start(c: &Ctx, i: usize, value: bool) {
         let result = startup::set_enabled(&mut entry, value);
         let _ = weak.upgrade_in_event_loop(move |ui| {
             ui.global::<AppState>().set_busy(false);
-            let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut g = core.locked();
             if let Some(slot) = g.startups.iter_mut().find(|e| same_start(e, &entry)) {
                 *slot = entry;
             }
@@ -454,7 +427,7 @@ fn delete_start(c: &Ctx, i: usize) {
     if c.weak.upgrade().is_none_or(|ui| ui.global::<AppState>().get_busy()) {
         return;
     }
-    let Some(entry) = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).startups.get(i).cloned() else { return };
+    let Some(entry) = c.core.locked().startups.get(i).cloned() else { return };
     let c2 = c.clone();
     confirm(
         c,
@@ -486,7 +459,7 @@ fn delete_start(c: &Ctx, i: usize) {
                 let _ = weak.upgrade_in_event_loop(move |ui| {
                     crate::winui::trim_soon();
                     ui.global::<AppState>().set_busy(false);
-                    let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let mut g = core.locked();
                     if let Some(list) = list {
                         g.startups = list;
                     }
@@ -522,7 +495,7 @@ fn reload_startups(c: &Ctx, done: Option<String>) {
             if owns_busy {
                 ui.global::<AppState>().set_busy(false);
             }
-            let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut g = core.locked();
             g.startups = list;
             push_startups(&ui, &g);
             push_home(&ui, &g);
@@ -558,7 +531,7 @@ fn preload_startups(c: &Ctx) {
         let list = startup::list_cached();
         let _ = weak.upgrade_in_event_loop(move |ui| {
             ui.global::<AppState>().set_startups_loading(false);
-            let mut g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut g = core.locked();
             if g.startups.is_empty() {
                 g.startups = list;
                 push_startups(&ui, &g);
@@ -586,7 +559,7 @@ fn preload_drives(c: &Ctx) {
         crate::engine::drives::refresh();
         let _ = weak.upgrade_in_event_loop(move |ui| {
             push_low_disk(&ui);
-            let g = core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let g = core.locked();
             push_home(&ui, &g);
         });
     });
@@ -623,7 +596,7 @@ pub fn apply_fonts(ui: &MainWindow) {
 
 pub fn enter_page(c: &Ctx, page: i32) {
     let (targets_done, reg_done) = {
-        let g = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let g = c.core.locked();
         (g.targets.iter().any(|t| t.scanned), g.reg_scanned)
     };
     match page {
@@ -662,7 +635,7 @@ pub fn setup(ui: &MainWindow) {
     let core: Shared = Arc::new(Mutex::new(make_core(admin)));
     let ctx = Ctx::new(ui.as_weak(), core.clone());
     CTX.with(|x| *x.borrow_mut() = Some(ctx.clone()));
-    push_all(ui, &core.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+    push_all(ui, &core.locked());
     push_low_disk(ui);
     preload_startups(&ctx);
     preload_drives(&ctx);
@@ -707,7 +680,7 @@ pub fn setup(ui: &MainWindow) {
         move |tab| {
             let Some(ui) = c.weak.upgrade() else { return };
             ui.global::<AppState>().set_start_tab(tab);
-            push_startups(&ui, &c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            push_startups(&ui, &c.core.locked());
             reset_startups(&ui);
         }
     });
@@ -716,7 +689,7 @@ pub fn setup(ui: &MainWindow) {
         move |on| {
             let Some(ui) = c.weak.upgrade() else { return };
             ui.global::<AppState>().set_start_show_system(on);
-            push_startups(&ui, &c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+            push_startups(&ui, &c.core.locked());
             reset_startups(&ui);
         }
     });
@@ -724,7 +697,7 @@ pub fn setup(ui: &MainWindow) {
         let c = ctx.clone();
         move || {
             let Some(ui) = c.weak.upgrade() else { return };
-            let mut g = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut g = c.core.locked();
             let admin = g.admin;
             let mut flags = Vec::new();
             for t in g.targets.iter_mut() {
@@ -744,7 +717,7 @@ pub fn setup(ui: &MainWindow) {
         move |i| {
             let Some(ui) = c.weak.upgrade() else { return };
             let i = i as usize;
-            let mut g = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut g = c.core.locked();
             let admin = g.admin;
             let Some(t) = g.targets.get_mut(i) else { return };
             if t.needs_admin && !admin {
@@ -761,7 +734,7 @@ pub fn setup(ui: &MainWindow) {
         let c = ctx.clone();
         move |i| {
             let Some(ui) = c.weak.upgrade() else { return };
-            let Some(t) = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).targets.get(i as usize).cloned() else { return };
+            let Some(t) = c.core.locked().targets.get(i as usize).cloned() else { return };
             let title = i18n::get(&format!("t.{}", t.id));
             let st = ui.global::<AppState>();
             let (icon, tint) = cat_style(&t.id);
@@ -775,7 +748,7 @@ pub fn setup(ui: &MainWindow) {
             st.set_details_open(true);
             let weak = c.weak.clone();
             let stop = Arc::new(AtomicBool::new(false));
-            if let Some(old) = DETAILS_STOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner).replace(stop.clone()) {
+            if let Some(old) = DETAILS_STOP.locked().replace(stop.clone()) {
                 old.store(true, Ordering::Relaxed);
             }
             std::thread::spawn(move || {
@@ -814,7 +787,7 @@ pub fn setup(ui: &MainWindow) {
     st.on_close_details({
         let c = ctx.clone();
         move || {
-            if let Some(old) = DETAILS_STOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+            if let Some(old) = DETAILS_STOP.locked().take() {
                 old.store(true, Ordering::Relaxed);
             }
             if let Some(ui) = c.weak.upgrade() {
@@ -830,7 +803,7 @@ pub fn setup(ui: &MainWindow) {
                 return;
             }
             let i = i as usize;
-            let mut g = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut g = c.core.locked();
             let admin = g.admin;
             let Some(issue) = g.issues.get_mut(i) else { return };
             if issue_locked(issue, admin) {
@@ -851,7 +824,7 @@ pub fn setup(ui: &MainWindow) {
             if ui.global::<AppState>().get_busy() {
                 return;
             }
-            let mut g = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut g = c.core.locked();
             let admin = g.admin;
             let all = g.issues.iter().filter(|i| !issue_locked(i, admin) && !registry::is_leftover(&i.kind)).all(|i| i.selected);
             for i in g.issues.iter_mut().filter(|i| !issue_locked(i, admin) && !registry::is_leftover(&i.kind)) {
@@ -871,7 +844,7 @@ pub fn setup(ui: &MainWindow) {
     st.on_open_report({
         let c = ctx.clone();
         move || {
-            let path = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).last_report.clone();
+            let path = c.core.locked().last_report.clone();
             if let Some(p) = path {
                 let _ = sys::launch("notepad.exe", &sys::quoted(&p));
             }
@@ -894,7 +867,7 @@ pub fn setup(ui: &MainWindow) {
             data::write_setting("keep-recent.txt", if keep { "recent" } else { "all" });
             let Some(ui) = c.weak.upgrade() else { return };
             ui.global::<AppState>().set_keep_recent(keep);
-            let scanned = c.core.lock().unwrap_or_else(std::sync::PoisonError::into_inner).targets.iter().any(|t| t.scanned);
+            let scanned = c.core.locked().targets.iter().any(|t| t.scanned);
             if scanned {
                 start_scan(&c, Scope::Targets);
             }

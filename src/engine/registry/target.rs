@@ -65,7 +65,7 @@ pub(in crate::engine) fn native_name(key: &RegKey) -> io::Result<String> {
             Some(words.as_mut_ptr().cast()), (words.len() * 4) as u32, &mut needed) };
         if status.0 >= 0 {
             let length = words[0] as usize;
-            if length % 2 != 0 || length > words.len() * 4 - 4 {
+            if !length.is_multiple_of(2) || length > words.len() * 4 - 4 {
                 return Err(refused());
             }
             let name = unsafe { std::slice::from_raw_parts(words.as_ptr().add(1).cast::<u16>(), length / 2) };

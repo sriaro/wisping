@@ -6,7 +6,7 @@ use windows::Win32::System::Memory::{GetProcessHeap, HEAP_FLAGS, HeapCompact};
 use windows::Win32::System::ProcessStatus::EmptyWorkingSet;
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
-use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, ReleaseDC, VREFRESH};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint};
 use windows::Win32::Graphics::Dwm::{DWMWA_BORDER_COLOR, DWMWA_CLOAK, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
 use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::System::Threading::GetCurrentProcessId;
@@ -112,19 +112,6 @@ fn trim_if_minimized() {
     }
 }
 
-pub fn refresh_rate() -> Option<u32> {
-    unsafe {
-        let hwnd = our_window();
-        let hdc = GetDC(hwnd);
-        if hdc.0.is_null() {
-            return None;
-        }
-        let hz = GetDeviceCaps(Some(hdc), VREFRESH);
-        let _ = ReleaseDC(hwnd, hdc);
-        (hz > 0).then_some(hz as u32)
-    }
-}
-
 pub fn trim_memory() {
     unsafe {
         let _ = HeapCompact(GetProcessHeap().unwrap_or_default(), HEAP_FLAGS(0));
@@ -180,11 +167,6 @@ pub fn apply_backdrop(dark: bool) -> bool {
     set_dark(dark);
     let margins = MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 };
     unsafe { DwmExtendFrameIntoClientArea(hwnd, &margins) }.is_ok()
-}
-
-pub fn window_style() -> Option<u32> {
-    let hwnd = our_window()?;
-    Some(unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32)
 }
 
 pub fn strip_caption_buttons() -> bool {

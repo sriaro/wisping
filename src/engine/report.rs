@@ -35,6 +35,9 @@ pub fn write_clean(lines: &[Line]) -> Option<PathBuf> {
         if l.before.recycle {
             out.push_str("  Location: Recycle Bin of every drive (emptied through Windows)\r\n");
         }
+        if l.before.shortcuts {
+            out.push_str("  Only shortcuts whose target is missing from a fixed drive are deleted.\r\n");
+        }
         for key in &l.before.reg {
             match key.split_once('|') {
                 Some((k, v)) => out.push_str(&format!("  Location: HKCU\\{}  (only the value \"{}\", the key is kept)\r\n", k, v)),

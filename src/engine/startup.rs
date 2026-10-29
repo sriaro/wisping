@@ -102,7 +102,9 @@ pub fn list() -> Vec<StartupEntry> {
     out
 }
 
-static CACHE: OnceLock<Mutex<Option<(Instant, Vec<StartupEntry>)>>> = OnceLock::new();
+type Cached = Option<(Instant, Vec<StartupEntry>)>;
+
+static CACHE: OnceLock<Mutex<Cached>> = OnceLock::new();
 const CACHE_AGE: Duration = Duration::from_secs(5);
 
 pub fn invalidate_cache() {

@@ -12,6 +12,8 @@ use windows::Win32::Security::WinTrust::{
 use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW};
 use windows::core::{HSTRING, PCWSTR};
 
+use super::lock::LockExt;
+
 fn query(block: &[u8], sub: &str) -> Option<(*const u8, u32)> {
     let mut ptr: *mut c_void = std::ptr::null_mut();
     let mut len = 0u32;
@@ -167,7 +169,7 @@ fn render_cache(map: &HashMap<String, Stamp>) -> String {
 }
 
 pub fn persist() {
-    let mut guard = cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut guard = cache().locked();
     if !guard.dirty {
         return;
     }
@@ -193,12 +195,12 @@ pub fn publisher(path: &str) -> String {
     let stamp = (meta.last_write_time(), meta.len());
     let cache = cache();
     let key = path.to_lowercase();
-    if let Some((time, size, v)) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).map.get(&key)
+    if let Some((time, size, v)) = cache.locked().map.get(&key)
         && (*time, *size) == stamp {
             return v.clone();
     }
     let value = if admin_only(p) { company(p) } else { signer(p).unwrap_or_default() };
-    let mut cached = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut cached = cache.locked();
     if cached.map.len() >= CACHE_LIMIT {
         cached.map.clear();
     }

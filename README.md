@@ -20,7 +20,8 @@ Wisping is a portable system maintenance utility for Windows 10 and 11. Wisping 
 
 ## Features
 
-- **Clean**: temporary files, caches, logs, crash dumps, update downloads, browser caches, Explorer and Office history, the Recycle Bin, and the caches of developer and AI tools. Each item says what it removes and how risky it is. Items that end sign-ins or erase history are off by default, and files from the last 24 hours are kept unless that protection is turned off.
+- **Clean**: temporary files, caches, logs, crash dumps, update downloads, broken shortcuts, browser caches, Explorer and Office history, the Recycle Bin, and the caches of desktop apps, game launchers, developer tools and AI tools. Each item says what it removes and how risky it is. Items that end sign-ins or erase history are off by default, and files from the last 24 hours are kept unless that protection is turned off.
+- **Scheduled cleaning**: `Wisping.exe --clean` cleans without opening a window: the items of the last clean from the window when Remember settings is on, otherwise the default items. The report, log and history are the same as for a clean from the window, so Windows Task Scheduler can run it.
 - **Registry and leftovers**: shared DLLs, app paths, uninstall entries, MUI cache, COM classes, file extensions, Open With lists and tray icons that point to nothing, and folders left behind by removed programs. Registry fixes are written to a .reg backup first; folders go to the Recycle Bin.
 - **Startup**: apps that start at sign-in, scheduled tasks, right-click menu entries and services, each with a switch and a note on how safe it is to turn off. Windows items are protected and hidden by default.
 - **Programs**: installed programs with size and install date. Uninstalling runs the program's own uninstaller.

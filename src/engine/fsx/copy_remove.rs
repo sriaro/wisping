@@ -37,55 +37,6 @@ struct CopyState {
     error: Option<io::Error>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::engine::fsx::security_tests::fixture;
-
-    #[test]
-    fn security_startup_holds_source_and_backup_until_deletion() {
-        let base = fixture("startup-pinned-copy");
-        let from = base.join("from");
-        let to = base.join("to");
-        fs::create_dir(&from).unwrap();
-        fs::create_dir(&to).unwrap();
-        let file = from.join("test.lnk");
-        let backup = to.join("test.lnk");
-        fs::write(&file, b"original").unwrap();
-        let source = PinnedDir::open(&from).unwrap();
-        let target = PinnedDir::open(&to).unwrap();
-        run(&source, OsStr::new("test.lnk"), &target, || {
-            assert!(fs::rename(&from, base.join("moved-source")).is_err());
-            assert!(fs::rename(&to, base.join("moved-backup")).is_err());
-            assert!(fs::rename(&file, from.join("replacement.lnk")).is_err());
-            assert!(fs::write(&file, b"changed source").is_err());
-            assert!(fs::rename(&backup, to.join("replacement.lnk")).is_err());
-            assert!(fs::write(&backup, b"changed backup").is_err());
-        }).unwrap();
-        assert!(!file.exists());
-        assert_eq!(fs::read(&backup).unwrap(), b"original");
-    }
-
-    #[test]
-    fn security_startup_readonly_source_keeps_its_backup_and_file() {
-        let base = fixture("startup-readonly-copy");
-        let from = base.join("from");
-        let to = base.join("to");
-        fs::create_dir(&from).unwrap();
-        fs::create_dir(&to).unwrap();
-        let file = from.join("test.lnk");
-        fs::write(&file, b"original").unwrap();
-        let mut permissions = fs::metadata(&file).unwrap().permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&file, permissions).unwrap();
-        let source = PinnedDir::open(&from).unwrap();
-        let target = PinnedDir::open(&to).unwrap();
-        assert!(source.backup_and_remove_file(OsStr::new("test.lnk"), &target).is_err());
-        assert_eq!(fs::read(&file).unwrap(), b"original");
-        assert_eq!(fs::read(to.join("test.lnk")).unwrap(), b"original");
-    }
-}
-
 unsafe extern "system" fn copied_stream(
     _: i64, _: i64, _: i64, _: i64, _: u32, reason: LPPROGRESS_ROUTINE_CALLBACK_REASON,
     source: HANDLE, destination: HANDLE, context: *const c_void,
@@ -166,4 +117,53 @@ pub(super) fn run(source: &PinnedDir, name: &OsStr, target: &PinnedDir, before_d
     }
     before_delete();
     if dispose(&deletion, false) { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::fsx::security_tests::fixture;
+
+    #[test]
+    fn security_startup_holds_source_and_backup_until_deletion() {
+        let base = fixture("startup-pinned-copy");
+        let from = base.join("from");
+        let to = base.join("to");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        let file = from.join("test.lnk");
+        let backup = to.join("test.lnk");
+        fs::write(&file, b"original").unwrap();
+        let source = PinnedDir::open(&from).unwrap();
+        let target = PinnedDir::open(&to).unwrap();
+        run(&source, OsStr::new("test.lnk"), &target, || {
+            assert!(fs::rename(&from, base.join("moved-source")).is_err());
+            assert!(fs::rename(&to, base.join("moved-backup")).is_err());
+            assert!(fs::rename(&file, from.join("replacement.lnk")).is_err());
+            assert!(fs::write(&file, b"changed source").is_err());
+            assert!(fs::rename(&backup, to.join("replacement.lnk")).is_err());
+            assert!(fs::write(&backup, b"changed backup").is_err());
+        }).unwrap();
+        assert!(!file.exists());
+        assert_eq!(fs::read(&backup).unwrap(), b"original");
+    }
+
+    #[test]
+    fn security_startup_readonly_source_keeps_its_backup_and_file() {
+        let base = fixture("startup-readonly-copy");
+        let from = base.join("from");
+        let to = base.join("to");
+        fs::create_dir(&from).unwrap();
+        fs::create_dir(&to).unwrap();
+        let file = from.join("test.lnk");
+        fs::write(&file, b"original").unwrap();
+        let mut permissions = fs::metadata(&file).unwrap().permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&file, permissions).unwrap();
+        let source = PinnedDir::open(&from).unwrap();
+        let target = PinnedDir::open(&to).unwrap();
+        assert!(source.backup_and_remove_file(OsStr::new("test.lnk"), &target).is_err());
+        assert_eq!(fs::read(&file).unwrap(), b"original");
+        assert_eq!(fs::read(to.join("test.lnk")).unwrap(), b"original");
+    }
 }

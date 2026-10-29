@@ -11,6 +11,7 @@ use windows::core::PWSTR;
 use winreg::RegKey;
 use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ};
 
+use super::lock::LockExt;
 use super::{fsx, sys};
 
 const MAX_UNITS: usize = 32768;
@@ -157,10 +158,10 @@ pub fn var(name: &str) -> Option<String> {
     }
     static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(hit) = cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&lower) {
+    if let Some(hit) = cache.locked().get(&lower) {
         return hit.clone();
     }
     let value = trusted(name, 0);
-    cache.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(lower, value.clone());
+    cache.locked().insert(lower, value.clone());
     value
 }

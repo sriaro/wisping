@@ -148,8 +148,9 @@ fn resolve() -> PathBuf {
 
 fn set_root(path: PathBuf) {
     let leaked: &'static Path = Box::leak(path.into_boxed_path());
-    *ROOT.write().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(leaked);
-    refresh_own();
+    let mut guard = ROOT.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    refresh_own(leaked);
+    *guard = Some(leaked);
 }
 
 pub fn root() -> &'static Path {
@@ -161,9 +162,8 @@ pub fn root() -> &'static Path {
         return p;
     }
     let leaked: &'static Path = Box::leak(resolve().into_boxed_path());
+    refresh_own(leaked);
     *guard = Some(leaked);
-    drop(guard);
-    refresh_own();
     leaked
 }
 
@@ -191,8 +191,8 @@ pub fn own_dirs() -> [PathBuf; 2] {
     [root().to_path_buf(), exe_dir()]
 }
 
-fn refresh_own() {
-    let keys: Option<Vec<String>> = own_dirs().iter().map(|d| fsx::norm_key(d).map(|k| k + "\\")).collect();
+fn refresh_own(root: &Path) {
+    let keys: Option<Vec<String>> = [root.to_path_buf(), exe_dir()].iter().map(|d| fsx::norm_key(d).map(|k| k + "\\")).collect();
     *OWN.write().unwrap_or_else(std::sync::PoisonError::into_inner) = keys.unwrap_or_default();
 }
 

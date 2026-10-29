@@ -3,6 +3,8 @@ use std::sync::Mutex;
 use windows::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives};
 use windows::core::PCWSTR;
 
+use super::lock::LockExt;
+
 const DRIVE_FIXED: u32 = 3;
 
 static CACHE: Mutex<Vec<Drive>> = Mutex::new(Vec::new());
@@ -21,12 +23,12 @@ impl Drive {
 }
 
 pub fn cached() -> Vec<Drive> {
-    CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    CACHE.locked().clone()
 }
 
 pub fn refresh() -> Vec<Drive> {
     let list = fixed();
-    *CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = list.clone();
+    *CACHE.locked() = list.clone();
     list
 }
 
