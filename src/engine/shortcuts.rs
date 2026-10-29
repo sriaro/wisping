@@ -135,10 +135,10 @@ fn missing(target: &Path) -> bool {
         return false;
     }
     let root = [b[0] as u16, b':' as u16, b'\\' as u16, 0];
-    if unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } != DRIVE_FIXED || reparse_ancestor(target) {
+    if unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } != DRIVE_FIXED {
         return false;
     }
-    matches!(fs::symlink_metadata(target), Err(e) if e.kind() == io::ErrorKind::NotFound)
+    matches!(fs::symlink_metadata(target), Err(e) if e.kind() == io::ErrorKind::NotFound) && !reparse_ancestor(target)
 }
 
 pub fn targets(data: &[u8], dir: &Path) -> Vec<(PathBuf, bool)> {

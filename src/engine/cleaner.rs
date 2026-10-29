@@ -1041,7 +1041,7 @@ where
         dirs: keep_dirs.then(|| Mutex::new(Vec::new())),
     };
     std::thread::scope(|s| work(&w, s));
-    (w.results.into_inner().unwrap(), w.dirs.map(|d| d.into_inner().unwrap()).unwrap_or_default())
+    (w.results.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner), w.dirs.map(|d| d.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)).unwrap_or_default())
 }
 
 fn work<'scope, 'env, A, F>(w: &'env Walk<'env, A, F>, s: &'scope Scope<'scope, 'env>)
@@ -1066,13 +1066,11 @@ where
                     return;
                 }
                 q.idle += 1;
-                q = w.ready.wait(q).unwrap();
+                q = w.ready.wait(q).unwrap_or_else(std::sync::PoisonError::into_inner);
                 q.idle -= 1;
             }
         };
-        if !w.stop.load(Ordering::Relaxed) {
-            list(&w.plans[plan], &dir, &mut sub, &mut acc, w.visit);
-        }
+        let outcome = if w.stop.load(Ordering::Relaxed) { Ok(()) } else { std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| list(&w.plans[plan], &dir, &mut sub, &mut acc, w.visit))) };
         let grow = {
             let mut q = w.queue.locked();
             q.busy -= 1;
@@ -1086,6 +1084,9 @@ where
             }
             if q.jobs.len() > q.idle + 1 { reserve_walker() } else { None }
         };
+        if let Err(payload) = outcome {
+            std::panic::resume_unwind(payload);
+        }
         if let Some(slot) = grow {
             s.spawn(move || {
                 let _slot = slot;

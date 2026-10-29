@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::time::Instant;
 
-use windows::Win32::Foundation::{COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{COLORREF, GlobalFree, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW, DEFAULT_CHARSET,
     DEFAULT_GUI_FONT, DEFAULT_PITCH, DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetMonitorInfoW, GetStockObject, GetTextExtentPoint32W, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW,
@@ -412,14 +412,14 @@ impl Canvas<'_> {
         p[3] = (255.0 * a + p[3] as f32 * keep).round() as u8;
     }
 
-    fn fill(&mut self, r: [f32; 4], radius: f32, clip: Option<&[f32]>, color: impl Fn(f32, f32) -> ([u8; 3], f32)) {
+    fn fill(&mut self, r: [f32; 4], radius: f32, clip: Option<([f32; 4], f32)>, color: impl Fn(f32, f32) -> ([u8; 3], f32)) {
         let (x0, y0, x1, y1) = self.bounds(r, 1.0);
         for y in y0..y1 {
             for x in x0..x1 {
                 let (fx, fy) = (x as f32 + 0.5, y as f32 + 0.5);
                 let mut a = coverage(sdf(fx, fy, r, radius));
-                if let Some(m) = clip {
-                    a *= m[y * self.w + x];
+                if let Some((c, cr)) = clip {
+                    a *= coverage(sdf(fx, fy, c, cr));
                 }
                 if a > 0.0 {
                     let (c, ca) = color(fx, fy);
@@ -429,7 +429,7 @@ impl Canvas<'_> {
         }
     }
 
-    fn rrect(&mut self, r: [f32; 4], radius: f32, c: [u8; 3], a: f32, clip: Option<&[f32]>) {
+    fn rrect(&mut self, r: [f32; 4], radius: f32, c: [u8; 3], a: f32, clip: Option<([f32; 4], f32)>) {
         self.fill(r, radius, clip, |_, _| (c, a));
     }
 
@@ -460,15 +460,15 @@ impl Canvas<'_> {
         }
     }
 
-    fn mask(&self, r: [f32; 4], radius: f32) -> Vec<f32> {
-        let mut m = vec![0.0f32; self.w * self.h];
+    fn solidify(&mut self, r: [f32; 4], radius: f32) {
         let (x0, y0, x1, y1) = self.bounds(r, 1.0);
         for y in y0..y1 {
             for x in x0..x1 {
-                m[y * self.w + x] = coverage(sdf(x as f32 + 0.5, y as f32 + 0.5, r, radius));
+                if coverage(sdf(x as f32 + 0.5, y as f32 + 0.5, r, radius)) >= 1.0 {
+                    self.px[(y * self.w + x) * 4 + 3] = 255;
+                }
             }
         }
-        m
     }
 }
 
@@ -503,10 +503,10 @@ fn draw(d: &mut Dlg) {
     cv.rrect(outer, radius, pal.edge, 1.0, None);
     let one = s.max(1.0).round();
     let inner = [m + one, m + one, p.w - 2.0 * one, p.h - 2.0 * one];
-    let clip = cv.mask(inner, radius - one);
+    let clip = Some((inner, radius - one));
     cv.rrect(inner, radius - one, pal.body, 1.0, None);
-    cv.rrect([m, m + p.foot_y, p.w, p.h - p.foot_y], 0.0, pal.foot, 1.0, Some(&clip));
-    cv.rrect([m, m + p.foot_y, p.w, one], 0.0, pal.divider, 1.0, Some(&clip));
+    cv.rrect([m, m + p.foot_y, p.w, p.h - p.foot_y], 0.0, pal.foot, 1.0, clip);
+    cv.rrect([m, m + p.foot_y, p.w, one], 0.0, pal.divider, 1.0, clip);
 
     let b = [p.badge[0] + m, p.badge[1] + m, p.badge[2], p.badge[3]];
     cv.rrect(b, b[2] / 2.0, pal.critical, 1.0, None);
@@ -573,12 +573,7 @@ fn draw(d: &mut Dlg) {
     unsafe {
         let _ = GdiFlush();
     }
-    let outer_mask = cv.mask(outer, radius);
-    for (i, &c) in outer_mask.iter().enumerate() {
-        if c >= 1.0 {
-            cv.px[i * 4 + 3] = 255;
-        }
-    }
+    cv.solidify(outer, radius);
 }
 
 struct Dlg {
@@ -700,8 +695,8 @@ fn run(heading: &str, text: &str) -> Outcome {
 
 fn pump() {
     let mut msg = MSG::default();
-    while !with(|d| d.done).unwrap_or(true) {
-        let r = unsafe { GetMessageW(&mut msg, None, 0, 0) };
+    while let Some(hwnd) = with(|d| (!d.done).then_some(d.hwnd)).flatten() {
+        let r = unsafe { GetMessageW(&mut msg, Some(hwnd), 0, 0) };
         if r.0 <= 0 {
             break;
         }
@@ -940,11 +935,18 @@ fn copy_to_clipboard(hwnd: HWND, text: &str) -> bool {
                 let h = GlobalAlloc(GMEM_MOVEABLE, units.len() * 2).ok()?;
                 let p = GlobalLock(h) as *mut u16;
                 if p.is_null() {
+                    let _ = GlobalFree(Some(h));
                     return None;
                 }
                 std::ptr::copy_nonoverlapping(units.as_ptr(), p, units.len());
                 let _ = GlobalUnlock(h);
-                SetClipboardData(CF_UNICODETEXT, Some(HANDLE(h.0))).ok()
+                match SetClipboardData(CF_UNICODETEXT, Some(HANDLE(h.0))) {
+                    Ok(_) => Some(()),
+                    Err(_) => {
+                        let _ = GlobalFree(Some(h));
+                        None
+                    }
+                }
             })()
             .is_some();
         let _ = CloseClipboard();
