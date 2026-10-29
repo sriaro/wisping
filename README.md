@@ -33,7 +33,7 @@ Nothing is deleted until you confirm. Some system items need administrator right
 
 ## Download
 
-Get `Wisping-<version>-windows-x64.zip` from the Releases page, unzip it anywhere and run `Wisping.exe`. There is no installer. The exe is not signed, so SmartScreen may warn the first time it runs.
+Get `Wisping-<version>-windows-x64.zip` from the [Releases page](https://github.com/sriaro/wisping/releases), unzip it anywhere and run `Wisping.exe`. There is no installer. The exe is not signed, so SmartScreen may warn the first time it runs.
 
 ## Build
 

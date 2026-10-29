@@ -33,7 +33,7 @@ Wisping 是一款适用于 Windows 10 和 11 的便携式系统维护工具。�
 
 ## 下载
 
-到 Releases 页面下载 `Wisping-<version>-windows-x64.zip`，解压到任意位置，运行 `Wisping.exe`。无需安装。程序没有代码签名，首次运行时 SmartScreen 可能会发出警告。
+到 [Releases 页面](https://github.com/sriaro/wisping/releases)下载 `Wisping-<version>-windows-x64.zip`，解压到任意位置，运行 `Wisping.exe`。无需安装。程序没有代码签名，首次运行时 SmartScreen 可能会发出警告。
 
 ## 构建
 
