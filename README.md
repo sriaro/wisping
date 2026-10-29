@@ -1,6 +1,8 @@
 # Wisping
 
-Wisping is a portable cleaner for Windows. It removes junk files, finds registry entries and folders left behind by removed programs, manages startup items, lists installed programs, maps disk usage and resets a few Windows settings, in one exe with an English and Chinese interface.
+English | [简体中文](README.zh-CN.md)
+
+Wisping is a portable system maintenance utility for Windows 10 and 11. It removes temporary files and caches, detects orphaned registry entries and leftover folders from uninstalled software, and controls startup programs, scheduled tasks, context menu handlers and services. It also includes a disk usage analyser and a program uninstaller. Every registry change is backed up before it is applied.
 
 ## Features
 
