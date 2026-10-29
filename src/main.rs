@@ -7,6 +7,7 @@ mod geo;
 mod i18n;
 mod i18n_zh;
 mod motion;
+mod notice;
 mod pages;
 mod preview;
 mod selftest;
@@ -22,7 +23,9 @@ fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let text = info.to_string();
         engine::data::log(&format!("panic {}", text));
-        winui::fatal("Wisping", &text);
+        if !app::report_panic(text.clone()) {
+            notice::fatal(&text);
+        }
     }));
 }
 
@@ -89,6 +92,6 @@ fn main() {
     }
     if let Err(e) = run_app() {
         engine::data::log(&format!("fatal {}", e));
-        winui::fatal("Wisping", &e.to_string());
+        notice::fatal(&e.to_string());
     }
 }

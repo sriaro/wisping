@@ -23,6 +23,7 @@ use crate::views::{fill_details, set_row, cat_style, issue_locked, lock_issues, 
 use crate::{AppState, MainWindow, T, Theme};
 
 static DETAILS_STOP: Mutex<Option<Arc<AtomicBool>>> = Mutex::new(None);
+static WINDOW: Mutex<Option<(Weak<MainWindow>, std::thread::ThreadId)>> = Mutex::new(None);
 
 #[derive(Default)]
 pub struct Core {
@@ -74,8 +75,15 @@ pub fn idle_on_panic(weak: &Weak<MainWindow>) -> PanicReset {
         let st = ui.global::<AppState>();
         st.set_busy(false);
         st.set_status(i18n::get("status.idle").into());
-        show_error_in(ui, i18n::get("msg.failed"));
     })
+}
+
+pub fn report_panic(text: String) -> bool {
+    let Some((weak, thread)) = WINDOW.locked().clone() else { return false };
+    if std::thread::current().id() == thread {
+        return false;
+    }
+    weak.upgrade_in_event_loop(move |ui| show_error_in(&ui, format!("{}\n\n{}", i18n::get("msg.failed"), text))).is_ok()
 }
 
 type Action = Box<dyn FnOnce()>;
@@ -507,7 +515,7 @@ fn reload_startups(c: &Ctx, done: Option<String>) {
     });
 }
 
-fn detect_dark() -> bool {
+pub fn detect_dark() -> bool {
     if let Some(v) = data::read_setting("theme.txt") {
         return v == "dark";
     }
@@ -621,6 +629,7 @@ pub fn install_text(ui: &MainWindow) {
 
 pub fn setup(ui: &MainWindow) {
     crate::engine::settings::load();
+    *WINDOW.locked() = Some((ui.as_weak(), std::thread::current().id()));
     install_window_controls(ui);
     install_text(ui);
     let dark = detect_dark();

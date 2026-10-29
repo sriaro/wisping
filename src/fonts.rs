@@ -59,6 +59,16 @@ fn han_order(locale: &str) -> [&'static str; 4] {
     }
 }
 
+fn han_faces() -> [&'static str; 4] {
+    let system_locale = locale();
+    let traditional = ["zh-tw", "zh-hk", "zh-mo", "zh-hant"].iter().any(|p| system_locale.starts_with(p));
+    han_order(if crate::i18n::zh() && !traditional { "zh-cn" } else { &system_locale })
+}
+
+pub fn han_face() -> &'static str {
+    han_faces()[0]
+}
+
 pub fn install() {
     let mut collection = shared_collection();
     let mut tail: Vec<FamilyId> = Vec::new();
@@ -68,10 +78,7 @@ pub fn install() {
                 tail.push(id);
             }
     }
-    let system_locale = locale();
-    let traditional = ["zh-tw", "zh-hk", "zh-mo", "zh-hant"].iter().any(|p| system_locale.starts_with(p));
-    let han_locale = if crate::i18n::zh() && !traditional { "zh-cn".to_string() } else { system_locale };
-    let han: Vec<FamilyId> = han_order(&han_locale).iter().filter_map(|n| collection.family_id(n)).collect();
+    let han: Vec<FamilyId> = han_faces().iter().filter_map(|n| collection.family_id(n)).collect();
     for script in SCRIPTS {
         let key = FallbackKey::new(Script::from_bytes(*script), None);
         let mut chain: Vec<FamilyId> = Vec::new();

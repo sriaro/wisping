@@ -278,9 +278,9 @@ pub fn restart_elevated() -> bool {
     result.0 as isize > 32
 }
 
-pub fn fatal(title: &str, text: &str) {
+pub fn fatal(heading: &str, text: &str) {
     unsafe {
-        let _ = TaskDialog(None, None, &HSTRING::from(title), &HSTRING::from("Wisping"), &HSTRING::from(text), TASKDIALOG_COMMON_BUTTON_FLAGS(1), TD_ERROR_ICON, None);
+        let _ = TaskDialog(None, None, w!("Wisping"), &HSTRING::from(heading), &HSTRING::from(text), TASKDIALOG_COMMON_BUTTON_FLAGS(1), TD_ERROR_ICON, None);
     }
 }
 
