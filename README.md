@@ -16,7 +16,7 @@
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-Wisping is a portable system maintenance utility for Windows 10 and 11 that removes temporary files and caches, detects orphaned registry entries and leftover folders from uninstalled software, and controls startup programs, scheduled tasks, context menu handlers and services. A disk usage analyser and a program uninstaller are included.
+Wisping is a portable system maintenance utility for Windows 10 and 11. Wisping removes unneeded files, finds what uninstalled programs left behind, and manages startup programs, services and scheduled tasks. A disk usage analyser and a program uninstaller are included. Each feature is described below.
 
 ## Features
 
