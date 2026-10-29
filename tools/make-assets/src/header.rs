@@ -3,10 +3,10 @@ use std::fs;
 use std::io::BufWriter;
 use std::path::Path as FsPath;
 
-use tiny_skia::{Color, FillRule, GradientStop, Mask, PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient, SpreadMode, Transform};
+use tiny_skia::{Color, FillRule, FilterQuality, GradientStop, Paint, PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient, SpreadMode, Transform};
 use ttf_parser::{Face, OutlineBuilder, Tag};
 
-use super::{gradient, render, rgba, rounded_rect, sparkle};
+use super::{gradient, render, rgba, sparkle};
 
 const SCALE: f32 = 2.0;
 const HEIGHT: f32 = 152.0;
@@ -16,12 +16,9 @@ const FONT_SIZE: f32 = 92.0;
 const TRACKING: f32 = -0.012;
 const TAIL: f32 = 72.0;
 const MARGIN: f32 = 10.0;
-const FRAMES: u32 = 175;
 const FPS: u16 = 50;
-const SWEEP: f32 = 0.54;
-const POP: f32 = 0.13;
-const BAND: f32 = 90.0;
-const ANGLE: f32 = 0.35;
+const TEAL: (u8, u8, u8) = (0x1b, 0xc8, 0xb4);
+const BLUE: (u8, u8, u8) = (0x33, 0x6e, 0xf2);
 
 struct Outline {
     pb: PathBuilder,
@@ -56,111 +53,172 @@ impl OutlineBuilder for Outline {
 }
 
 struct Wordmark {
-    path: tiny_skia::Path,
+    glyphs: Vec<tiny_skia::Path>,
     width: f32,
     cap: f32,
 }
 
 fn wordmark(face: &Face, text: &str) -> Wordmark {
     let s = FONT_SIZE / face.units_per_em() as f32;
-    let mut pb = PathBuilder::new();
+    let mut glyphs = Vec::new();
     let mut pen = 0.0;
     for ch in text.chars() {
         let id = face.glyph_index(ch).expect("glyph");
-        let mut o = Outline { pb, x: pen, y: 0.0, s };
+        let mut o = Outline { pb: PathBuilder::new(), x: pen, y: 0.0, s };
         face.outline_glyph(id, &mut o);
-        pb = o.pb;
+        glyphs.extend(o.pb.finish());
         pen += face.glyph_hor_advance(id).unwrap_or(0) as f32 * s + TRACKING * FONT_SIZE;
     }
     let cap = face.capital_height().unwrap_or(700) as f32 * s;
-    Wordmark { path: pb.finish().expect("outline"), width: pen - TRACKING * FONT_SIZE, cap }
+    Wordmark { glyphs, width: pen - TRACKING * FONT_SIZE, cap }
 }
 
-fn pop(u: f32) -> f32 {
-    if (0.0..1.0).contains(&u) { (PI * u.sqrt()).sin().powi(2) } else { 0.0 }
+fn clamp01(u: f32) -> f32 {
+    u.clamp(0.0, 1.0)
 }
 
-fn band(c: f32, stops: &[(f32, Color)]) -> tiny_skia::Paint<'static> {
-    let (dx, dy) = (BAND * ANGLE.cos(), BAND * ANGLE.sin());
-    let y = HEIGHT * 0.5;
-    gradient((c - dx, y - dy), (c + dx, y + dy), stops)
+fn out_cubic(u: f32) -> f32 {
+    1.0 - (1.0 - clamp01(u)).powi(3)
 }
 
-fn frame(t: f32, mark: &Wordmark, ink: Color, icon: &Pixmap, width: f32) -> Pixmap {
-    let mut pm = Pixmap::new((width * SCALE) as u32, (HEIGHT * SCALE) as u32).unwrap();
-    let top = (HEIGHT - ICON) * 0.5;
-    pm.draw_pixmap((MARGIN * SCALE) as i32, (top * SCALE) as i32, icon.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
+fn in_out(u: f32) -> f32 {
+    0.5 - 0.5 * (PI * clamp01(u)).cos()
+}
 
-    let start = MARGIN - BAND * 1.2;
-    let travel = width + BAND * 2.4 - MARGIN;
-    let c = start + t / SWEEP * travel;
-    let sweeping = t < SWEEP;
-    let screen = Transform::from_scale(SCALE, SCALE);
+fn back(u: f32) -> f32 {
+    let v = clamp01(u) - 1.0;
+    1.0 + 2.70158 * v.powi(3) + 1.70158 * v.powi(2)
+}
 
-    if sweeping {
-        let k = ICON / 256.0;
-        let at = Transform::from_scale(k, k).post_translate(MARGIN, top).post_scale(SCALE, SCALE);
-        let mut mask = Mask::new(pm.width(), pm.height()).unwrap();
-        mask.fill_path(&rounded_rect(10.0, 10.0, 236.0, 236.0, 60.0), FillRule::Winding, true, at);
-        let light = band(c, &[(0.0, rgba(255, 255, 255, 0.0)), (0.5, rgba(255, 255, 255, 0.62)), (1.0, rgba(255, 255, 255, 0.0))]);
-        let full = rounded_rect(0.0, 0.0, width, HEIGHT, 1.0);
-        pm.fill_path(&full, &light, FillRule::Winding, screen, Some(&mask));
+fn lerp(a: f32, b: f32, u: f32) -> f32 {
+    a + (b - a) * u
+}
+
+fn tone(u: f32, a: f32) -> Color {
+    let u = clamp01(u);
+    let mix = |p: u8, q: u8| lerp(p as f32, q as f32, u).round() as u8;
+    rgba(mix(TEAL.0, BLUE.0), mix(TEAL.1, BLUE.1), mix(TEAL.2, BLUE.2), a)
+}
+
+fn solid(color: Color) -> Paint<'static> {
+    let mut p = Paint::default();
+    p.set_color(color);
+    p.anti_alias = true;
+    p
+}
+
+struct Scene<'a> {
+    mark: &'a Wordmark,
+    ink: Color,
+    icon: &'a Pixmap,
+    width: f32,
+}
+
+impl Scene<'_> {
+    fn canvas(&self) -> Pixmap {
+        Pixmap::new((self.width * SCALE) as u32, (HEIGHT * SCALE) as u32).unwrap()
     }
 
-    let x = MARGIN + ICON + GAP;
-    let baseline = HEIGHT * 0.5 + mark.cap * 0.5;
-    let at = Transform::from_translate(x, baseline).post_scale(SCALE, SCALE);
-    let mut ink_paint = tiny_skia::Paint::default();
-    ink_paint.set_color(ink);
-    ink_paint.anti_alias = true;
-    pm.fill_path(&mark.path, &ink_paint, FillRule::Winding, at, None);
-    if sweeping {
-        let mut mask = Mask::new(pm.width(), pm.height()).unwrap();
-        mask.fill_path(&mark.path, FillRule::Winding, true, at);
-        let glow = band(
-            c,
-            &[
-                (0.0, rgba(0x1b, 0xc8, 0xb4, 0.0)),
-                (0.3, rgba(0x1b, 0xc8, 0xb4, 0.9)),
-                (0.5, rgba(0x2f, 0x9b, 0xe8, 1.0)),
-                (0.7, rgba(0x33, 0x6e, 0xf2, 0.9)),
-                (1.0, rgba(0x33, 0x6e, 0xf2, 0.0)),
-            ],
-        );
-        let full = rounded_rect(0.0, 0.0, width, HEIGHT, 1.0);
-        pm.fill_path(&full, &glow, FillRule::Winding, screen, Some(&mask));
+    fn text_x(&self) -> f32 {
+        MARGIN + ICON + GAP
     }
 
-    let ex = x + mark.width;
-    let accent = |a: f32| gradient((ex, 0.0), (ex + TAIL, HEIGHT), &[(0.0, rgba(0x1b, 0xc8, 0xb4, a)), (1.0, rgba(0x33, 0x6e, 0xf2, a))]);
-    let sky = baseline - mark.cap;
-    let stars = [(ex + 30.0, sky + 10.0, 17.0), (ex + 54.0, sky + 40.0, 9.0), (ex + 24.0, sky + 52.0, 5.5)];
-    for (i, (cx, cy, r)) in stars.into_iter().enumerate() {
-        let hit = (cx + ANGLE.tan() * (cy - HEIGHT * 0.5) - start) / travel * SWEEP;
-        let p = pop((t - hit) / POP);
-        let a = 0.85 + 0.15 * p;
-        let r = r * (1.0 + 0.4 * p);
-        let spin = Transform::from_rotate_at(18.0 * p, cx, cy).post_scale(SCALE, SCALE);
-        if p > 0.0 {
-            let mut halo = tiny_skia::Paint::default();
+    fn baseline(&self) -> f32 {
+        HEIGHT * 0.5 + self.mark.cap * 0.5
+    }
+
+    fn end(&self) -> f32 {
+        self.text_x() + self.mark.width
+    }
+
+    fn stars(&self) -> [(f32, f32, f32); 3] {
+        let (ex, sky) = (self.end(), self.baseline() - self.mark.cap);
+        [(ex + 30.0, sky + 10.0, 17.0), (ex + 54.0, sky + 40.0, 9.0), (ex + 24.0, sky + 52.0, 5.5)]
+    }
+
+    fn shade(&self, x: f32) -> f32 {
+        (x - self.text_x()) / (self.width - self.text_x())
+    }
+
+    fn icon_at(&self, pm: &mut Pixmap, scale: f32, alpha: f32) {
+        if alpha <= 0.0 || scale <= 0.0 {
+            return;
+        }
+        let half = ICON * SCALE * 0.5;
+        let quality = if (scale - 1.0).abs() < 1e-4 { FilterQuality::Nearest } else { FilterQuality::Bicubic };
+        let paint = PixmapPaint { opacity: alpha, quality, ..PixmapPaint::default() };
+        let at = Transform::from_translate(-half, -half).post_scale(scale, scale).post_translate((MARGIN + ICON * 0.5) * SCALE, HEIGHT * 0.5 * SCALE);
+        pm.draw_pixmap(0, 0, self.icon.as_ref(), &paint, at, None);
+    }
+
+    fn glyph(&self, pm: &mut Pixmap, i: usize, dy: f32, alpha: f32) {
+        let mut ink = self.ink;
+        ink.apply_opacity(alpha);
+        let at = Transform::from_translate(self.text_x(), self.baseline() + dy).post_scale(SCALE, SCALE);
+        pm.fill_path(&self.mark.glyphs[i], &solid(ink), FillRule::Winding, at, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn star(&self, pm: &mut Pixmap, (cx, cy, r): (f32, f32, f32), round: bool, scale: f32, spin: f32, alpha: f32, glow: f32) {
+        if scale <= 0.0 || alpha <= 0.0 {
+            return;
+        }
+        let screen = Transform::from_scale(SCALE, SCALE);
+        let r = r * scale;
+        if glow > 0.0 {
+            let mut halo = Paint::default();
             halo.shader = RadialGradient::new(
                 Point::from_xy(cx, cy),
                 0.0,
                 Point::from_xy(cx, cy),
-                r * 1.5,
-                vec![GradientStop::new(0.0, rgba(0x2f, 0x9b, 0xe8, 0.32 * p)), GradientStop::new(1.0, rgba(0x2f, 0x9b, 0xe8, 0.0))],
+                r * 1.9,
+                vec![GradientStop::new(0.0, tone(self.shade(cx), 0.36 * glow * alpha)), GradientStop::new(1.0, tone(self.shade(cx), 0.0))],
                 SpreadMode::Pad,
                 Transform::identity(),
             )
             .unwrap();
             halo.anti_alias = true;
-            pm.fill_path(&PathBuilder::from_circle(cx, cy, r * 1.5).unwrap(), &halo, FillRule::Winding, screen, None);
+            pm.fill_path(&PathBuilder::from_circle(cx, cy, r * 1.9).unwrap(), &halo, FillRule::Winding, screen, None);
         }
-        if i == 2 {
-            pm.fill_path(&PathBuilder::from_circle(cx, cy, r * 0.62).unwrap(), &accent(a), FillRule::Winding, screen, None);
+        let ex = self.end();
+        let paint = gradient((ex, 0.0), (ex + TAIL, HEIGHT), &[(0.0, tone(0.0, alpha)), (1.0, tone(1.0, alpha))]);
+        if round {
+            pm.fill_path(&PathBuilder::from_circle(cx, cy, r * 0.62).unwrap(), &paint, FillRule::Winding, screen, None);
         } else {
-            pm.fill_path(&sparkle(cx, cy, r, 0.17), &accent(a), FillRule::Winding, spin, None);
+            let at = Transform::from_rotate_at(spin, cx, cy).post_scale(SCALE, SCALE);
+            pm.fill_path(&sparkle(cx, cy, r, 0.17), &paint, FillRule::Winding, at, None);
         }
+    }
+}
+
+fn faded(pm: &Pixmap, into: &mut Pixmap, alpha: f32) {
+    let paint = PixmapPaint { opacity: alpha, ..PixmapPaint::default() };
+    into.draw_pixmap(0, 0, pm.as_ref(), &paint, Transform::identity(), None);
+}
+
+const LOOP: f32 = 6.0;
+
+fn frame(sc: &Scene, t: f32) -> Pixmap {
+    let mut pm = sc.canvas();
+    let u = t / 0.55;
+    sc.icon_at(&mut pm, 0.6 + 0.4 * back(u), clamp01(u / 0.35));
+    for i in 0..sc.mark.glyphs.len() {
+        let u = (t - 0.3 - 0.065 * i as f32) / 0.5;
+        if u > 0.0 {
+            sc.glyph(&mut pm, i, 26.0 * (1.0 - out_cubic(u)), clamp01(u * 1.6));
+        }
+    }
+    for (k, s) in sc.stars().into_iter().enumerate() {
+        let u = clamp01((t - 1.05 - 0.12 * k as f32) / 0.5);
+        if u > 0.0 {
+            sc.star(&mut pm, s, k == 2, back(u), -90.0 * (1.0 - out_cubic(u)), clamp01(u * 2.0), (PI * u).sin());
+        }
+    }
+    let fade = clamp01((t - (LOOP - 0.45)) / 0.45);
+    if fade > 0.0 {
+        let mut out = sc.canvas();
+        faded(&pm, &mut out, 1.0 - in_out(fade));
+        return out;
     }
     pm
 }
@@ -205,7 +263,7 @@ fn crop(data: &[u8], w: u32, (x, y, cw, ch): (u32, u32, u32, u32)) -> Vec<u8> {
     out
 }
 
-fn write_apng(path: &FsPath, frames: &[Pixmap]) {
+fn write_apng(path: &FsPath, still: &Pixmap, frames: &[Pixmap]) {
     let (w, h) = (frames[0].width(), frames[0].height());
     let raw: Vec<Vec<u8>> = frames.iter().map(straight).collect();
     let mut shots = vec![Shot { rect: (0, 0, w, h), data: raw[0].clone(), delay: 1 }];
@@ -221,7 +279,9 @@ fn write_apng(path: &FsPath, frames: &[Pixmap]) {
     enc.set_depth(png::BitDepth::Eight);
     enc.set_compression(png::Compression::High);
     enc.set_animated(shots.len() as u32, 0).unwrap();
+    enc.set_sep_def_img(true).unwrap();
     let mut writer = enc.write_header().unwrap();
+    writer.write_image_data(&straight(still)).unwrap();
     for shot in &shots {
         let (x, y, cw, ch) = shot.rect;
         writer.set_frame_position(0, 0).unwrap();
@@ -246,7 +306,9 @@ pub fn write(dir: &FsPath) {
     let icon = render((ICON * SCALE) as u32);
     fs::create_dir_all(dir).unwrap();
     for (name, ink) in [("header-light.png", rgba(0x1f, 0x23, 0x28, 1.0)), ("header-dark.png", rgba(0xf0, 0xf6, 0xfc, 1.0))] {
-        let frames: Vec<Pixmap> = (0..FRAMES).map(|i| frame(i as f32 / FRAMES as f32, &mark, ink, &icon, width)).collect();
-        write_apng(&dir.join(name), &frames);
+        let sc = Scene { mark: &mark, ink, icon: &icon, width };
+        let count = (LOOP * FPS as f32).round() as u32;
+        let frames: Vec<Pixmap> = (0..count).map(|i| frame(&sc, i as f32 / FPS as f32)).collect();
+        write_apng(&dir.join(name), &frame(&sc, LOOP - 1.0), &frames);
     }
 }
