@@ -16,20 +16,20 @@
   <a href="README.zh-CN.md">简体中文</a>
 </p>
 
-Wisping is a portable system maintenance utility for Windows 10 and 11. It removes temporary files and caches, detects orphaned registry entries and leftover folders from uninstalled software, and controls startup programs, scheduled tasks, context menu handlers and services. It also includes a disk usage analyser and a program uninstaller. Every registry change is backed up before it is applied.
+Wisping is a portable system maintenance utility for Windows 10 and 11 that removes temporary files and caches, detects orphaned registry entries and leftover folders from uninstalled software, and controls startup programs, scheduled tasks, context menu handlers and services. A disk usage analyser and a program uninstaller are included. Every registry change is backed up before it is applied.
 
 ## Features
 
-- **Clean**: temporary files, caches, logs, crash dumps, update downloads, browser caches, Explorer and Office history, the Recycle Bin, and the caches of developer and AI tools. Each item says what it removes and how risky it is. Items that sign you out or erase history are off by default, and files from the last 24 hours are kept unless you turn that off.
+- **Clean**: temporary files, caches, logs, crash dumps, update downloads, browser caches, Explorer and Office history, the Recycle Bin, and the caches of developer and AI tools. Each item says what it removes and how risky it is. Items that end sign-ins or erase history are off by default, and files from the last 24 hours are kept unless that protection is turned off.
 - **Registry and leftovers**: shared DLLs, app paths, uninstall entries, MUI cache, COM classes, file extensions, Open With lists and tray icons that point to nothing, and folders left behind by removed programs. Registry fixes are written to a .reg backup first; folders go to the Recycle Bin.
 - **Startup**: apps that start at sign-in, scheduled tasks, right-click menu entries and services, each with a switch and a note on how safe it is to turn off. Windows items are protected and hidden by default.
 - **Programs**: installed programs with size and install date. Uninstalling runs the program's own uninstaller.
-- **Disk usage**: a map of what takes the space in your files, app data or a drive, with the largest files, identical copies and the space each program uses. Looking changes nothing.
+- **Disk usage**: a map of what takes the space in personal files, app data or a drive, with the largest files, identical copies and the space each program uses. Looking changes nothing.
 - **Tools**: switches for Game Bar, diagnostic data, error reporting and manufacturer app downloads, and resets for the notification list and tray icons. Every key is backed up before it is changed.
 - **Backups**: every registry change is saved first and can be restored from the Backups page. A restore point before cleaning, a log and a history of past cleanups can be turned on; they are off by default.
-- **Look**: dark or light, and English or Chinese, following Windows until you choose.
+- **Look**: dark or light, and English or Chinese, following Windows until one is chosen.
 
-Nothing is deleted until you confirm. Some system items need administrator rights; the sidebar has a button that restarts Wisping as administrator.
+Nothing is deleted without confirmation. Some system items need administrator rights; the sidebar has a button that restarts Wisping as administrator.
 
 ## Download
 
@@ -47,11 +47,11 @@ The program is `target/release/Wisping.exe`. `tools\build-release.ps1` builds th
 
 ## Files and settings
 
-- Backups, settings, cleaning reports, the log and the history are in the `data` folder beside `Wisping.exe`. When that folder cannot be used, for example because the exe is in a temporary folder, under Windows, Program Files or OneDrive, or in a read-only place, Wisping uses `%LOCALAPPDATA%\Wisping` instead. A folder you choose on the Backups page is remembered in `wisping-location.txt` beside the exe, or in `%LOCALAPPDATA%\Wisping\location.txt` when the exe folder is read-only.
-- Run as administrator, Wisping keeps a few records under `HKLM\SOFTWARE\Wisping`: the original start type of the services it turned off, the original values of the policies set from the Tools page, and the integrity records of the registry backups it made with administrator rights. Such a backup can be restored with administrator rights only while it is unchanged.
+- Backups, settings, cleaning reports, the log and the history are in the `data` folder beside `Wisping.exe`. When that folder cannot be used, for example because the exe is in a temporary folder, under Windows, Program Files or OneDrive, or in a read-only place, Wisping uses `%LOCALAPPDATA%\Wisping` instead. A folder chosen on the Backups page is remembered in `wisping-location.txt` beside the exe, or in `%LOCALAPPDATA%\Wisping\location.txt` when the exe folder is read-only.
+- Run as administrator, Wisping keeps a few records under `HKLM\SOFTWARE\Wisping`: the original start type of services turned off from the Startup page, the original values of policies set from the Tools page, and the integrity records of registry backups made with administrator rights. Such a backup can be restored with administrator rights only while it is unchanged.
 - A restore point, when turned on, is requested from Windows System Restore before each clean or fix; Windows allows one a day.
 
-Wisping has no background process, keeps no log unless you turn it on, and makes no network connections.
+Wisping has no background process, keeps no log unless logging is turned on, and makes no network connections.
 
 ## Licence
 
