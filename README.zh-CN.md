@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/header-dark.png">
-    <img alt="Wisping" src="docs/header-light.png" width="561" height="152">
+    <img alt="Wisping" src="docs/header-light.png" width="561">
   </picture>
 </p>
 
