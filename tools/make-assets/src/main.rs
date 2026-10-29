@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::PathBuf;
 
+mod header;
+
 use tiny_skia::{Color, FillRule, GradientStop, LinearGradient, Paint, Path, PathBuilder, Pixmap, Point, RadialGradient, SpreadMode, Transform};
 
 const SIZES: [u32; 9] = [16, 20, 24, 32, 40, 48, 64, 128, 256];
@@ -227,6 +229,11 @@ fn write_art(dir: &PathBuf) {
 }
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("header") {
+        let dir: PathBuf = std::env::args().nth(2).map(PathBuf::from).expect("usage: make-assets header <docs dir>");
+        header::write(&dir);
+        return;
+    }
     let out: PathBuf = std::env::args().nth(1).map(PathBuf::from).expect("usage: make-icon <assets dir> <art dir>");
     let art: PathBuf = std::env::args().nth(2).map(PathBuf::from).expect("usage: make-icon <assets dir> <art dir>");
     write_art(&art);

@@ -6,5 +6,7 @@ publish = false
 
 [dependencies]
 tiny-skia = "0.12"
+ttf-parser = "0.25"
+png = "0.18"
 
 [workspace]

@@ -1,6 +1,20 @@
-# Wisping
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/header-dark.png">
+    <img alt="Wisping" src="docs/header-light.png" width="561" height="152">
+  </picture>
+</p>
 
-[English](README.md) | 简体中文
+<h3 align="center">稳妥的 Windows 系统维护工具。</h3>
+
+<p align="center">
+  <a href="#功能">功能</a> ·
+  <a href="#下载">下载</a> ·
+  <a href="#构建">构建</a> ·
+  <a href="#文件和设置">文件和设置</a> ·
+  <a href="#许可证">许可证</a> ·
+  <a href="README.md">English</a>
+</p>
 
 Wisping 是一款适用于 Windows 10 和 11 的便携式系统维护工具。它可以清理临时文件和缓存，检测已卸载软件遗留的失效注册表项和残留文件夹，并管理启动程序、计划任务、右键菜单处理程序和服务。它还提供磁盘占用分析和程序卸载功能。每次修改注册表前都会先备份。
 
@@ -29,7 +43,7 @@ Wisping 是一款适用于 Windows 10 和 11 的便携式系统维护工具。�
 cargo build --release --locked
 ```
 
-生成的程序位于 `target/release/Wisping.exe`。`tools\build-release.ps1` 构建用于发布的同一程序，其中不包含本机路径。`Wisping.exe --selftest result.txt` 运行内置自检（请先关闭其他正在运行的 Wisping），结果的最后一行应为 `ALL PASS`。`ui/` 中的图标和插图由 `tools/` 中的脚本生成。
+生成的程序位于 `target/release/Wisping.exe`。`tools\build-release.ps1` 构建用于发布的同一程序，其中不包含本机路径。`Wisping.exe --selftest result.txt` 运行内置自检（请先关闭其他正在运行的 Wisping），结果的最后一行应为 `ALL PASS`。`ui/` 中的图标和插图以及 `docs/` 中的标题图由 `tools/` 中的脚本生成。
 
 ## 文件和设置
 
