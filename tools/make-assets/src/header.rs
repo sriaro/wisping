@@ -16,10 +16,10 @@ const FONT_SIZE: f32 = 92.0;
 const TRACKING: f32 = -0.012;
 const TAIL: f32 = 72.0;
 const MARGIN: f32 = 10.0;
-const FRAMES: u32 = 120;
-const FPS: u16 = 30;
-const SWEEP: f32 = 0.55;
-const TWINKLE: f32 = 0.3;
+const FRAMES: u32 = 175;
+const FPS: u16 = 50;
+const SWEEP: f32 = 0.54;
+const POP: f32 = 0.13;
 const BAND: f32 = 90.0;
 const ANGLE: f32 = 0.35;
 
@@ -76,14 +76,8 @@ fn wordmark(face: &Face, text: &str) -> Wordmark {
     Wordmark { path: pb.finish().expect("outline"), width: pen - TRACKING * FONT_SIZE, cap }
 }
 
-fn bump(t: f32, from: f32, to: f32) -> f32 {
-    let u = (t - from) / (to - from);
-    if (0.0..1.0).contains(&u) { (PI * u).sin().powi(2) } else { 0.0 }
-}
-
-fn ease(u: f32) -> f32 {
-    let u = u.clamp(0.0, 1.0);
-    0.5 - 0.5 * (PI * u).cos()
+fn pop(u: f32) -> f32 {
+    if (0.0..1.0).contains(&u) { (PI * u.sqrt()).sin().powi(2) } else { 0.0 }
 }
 
 fn band(c: f32, stops: &[(f32, Color)]) -> tiny_skia::Paint<'static> {
@@ -97,8 +91,9 @@ fn frame(t: f32, mark: &Wordmark, ink: Color, icon: &Pixmap, width: f32) -> Pixm
     let top = (HEIGHT - ICON) * 0.5;
     pm.draw_pixmap((MARGIN * SCALE) as i32, (top * SCALE) as i32, icon.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
 
-    let reach = BAND * 1.6;
-    let c = -reach + ease(t / SWEEP) * (width + 2.0 * reach);
+    let start = MARGIN - BAND * 1.2;
+    let travel = width + BAND * 2.4 - MARGIN;
+    let c = start + t / SWEEP * travel;
     let sweeping = t < SWEEP;
     let screen = Transform::from_scale(SCALE, SCALE);
 
@@ -139,12 +134,13 @@ fn frame(t: f32, mark: &Wordmark, ink: Color, icon: &Pixmap, width: f32) -> Pixm
     let ex = x + mark.width;
     let accent = |a: f32| gradient((ex, 0.0), (ex + TAIL, HEIGHT), &[(0.0, rgba(0x1b, 0xc8, 0xb4, a)), (1.0, rgba(0x33, 0x6e, 0xf2, a))]);
     let sky = baseline - mark.cap;
-    let stars = [(ex + 30.0, sky + 10.0, 17.0, 0.44), (ex + 54.0, sky + 40.0, 9.0, 0.53), (ex + 24.0, sky + 52.0, 5.5, 0.62)];
-    for (i, (cx, cy, r, from)) in stars.into_iter().enumerate() {
-        let p = bump(t, from, from + TWINKLE);
-        let a = 0.78 + 0.22 * p;
-        let r = r * (0.86 + 0.42 * p);
-        let spin = Transform::from_rotate_at(90.0 * ease((t - from) / TWINKLE), cx, cy).post_scale(SCALE, SCALE);
+    let stars = [(ex + 30.0, sky + 10.0, 17.0), (ex + 54.0, sky + 40.0, 9.0), (ex + 24.0, sky + 52.0, 5.5)];
+    for (i, (cx, cy, r)) in stars.into_iter().enumerate() {
+        let hit = (cx + ANGLE.tan() * (cy - HEIGHT * 0.5) - start) / travel * SWEEP;
+        let p = pop((t - hit) / POP);
+        let a = 0.85 + 0.15 * p;
+        let r = r * (1.0 + 0.4 * p);
+        let spin = Transform::from_rotate_at(18.0 * p, cx, cy).post_scale(SCALE, SCALE);
         if p > 0.0 {
             let mut halo = tiny_skia::Paint::default();
             halo.shader = RadialGradient::new(
