@@ -3,7 +3,7 @@ use std::fs;
 use std::io::BufWriter;
 use std::path::Path as FsPath;
 
-use tiny_skia::{Color, FillRule, Mask, PathBuilder, Pixmap, PixmapPaint, Transform};
+use tiny_skia::{Color, FillRule, GradientStop, Mask, PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient, SpreadMode, Transform};
 use ttf_parser::{Face, OutlineBuilder, Tag};
 
 use super::{gradient, render, rgba, rounded_rect, sparkle};
@@ -14,10 +14,14 @@ const ICON: f32 = 120.0;
 const GAP: f32 = 26.0;
 const FONT_SIZE: f32 = 92.0;
 const TRACKING: f32 = -0.012;
-const TAIL: f32 = 62.0;
+const TAIL: f32 = 72.0;
 const MARGIN: f32 = 10.0;
-const FRAMES: u32 = 72;
-const FPS: u16 = 24;
+const FRAMES: u32 = 120;
+const FPS: u16 = 30;
+const SWEEP: f32 = 0.55;
+const TWINKLE: f32 = 0.3;
+const BAND: f32 = 90.0;
+const ANGLE: f32 = 0.35;
 
 struct Outline {
     pb: PathBuilder,
@@ -77,47 +81,89 @@ fn bump(t: f32, from: f32, to: f32) -> f32 {
     if (0.0..1.0).contains(&u) { (PI * u).sin().powi(2) } else { 0.0 }
 }
 
+fn ease(u: f32) -> f32 {
+    let u = u.clamp(0.0, 1.0);
+    0.5 - 0.5 * (PI * u).cos()
+}
+
+fn band(c: f32, stops: &[(f32, Color)]) -> tiny_skia::Paint<'static> {
+    let (dx, dy) = (BAND * ANGLE.cos(), BAND * ANGLE.sin());
+    let y = HEIGHT * 0.5;
+    gradient((c - dx, y - dy), (c + dx, y + dy), stops)
+}
+
 fn frame(t: f32, mark: &Wordmark, ink: Color, icon: &Pixmap, width: f32) -> Pixmap {
     let mut pm = Pixmap::new((width * SCALE) as u32, (HEIGHT * SCALE) as u32).unwrap();
     let top = (HEIGHT - ICON) * 0.5;
     pm.draw_pixmap((MARGIN * SCALE) as i32, (top * SCALE) as i32, icon.as_ref(), &PixmapPaint::default(), Transform::identity(), None);
 
-    let sweep = (t / 0.3).clamp(0.0, 1.0);
-    if sweep > 0.0 && sweep < 1.0 {
+    let reach = BAND * 1.6;
+    let c = -reach + ease(t / SWEEP) * (width + 2.0 * reach);
+    let sweeping = t < SWEEP;
+    let screen = Transform::from_scale(SCALE, SCALE);
+
+    if sweeping {
         let k = ICON / 256.0;
         let at = Transform::from_scale(k, k).post_translate(MARGIN, top).post_scale(SCALE, SCALE);
         let mut mask = Mask::new(pm.width(), pm.height()).unwrap();
         mask.fill_path(&rounded_rect(10.0, 10.0, 236.0, 236.0, 60.0), FillRule::Winding, true, at);
-        let c = -120.0 + sweep * 500.0;
-        let band = gradient(
-            (c - 70.0, c - 140.0),
-            (c + 70.0, c + 140.0),
-            &[(0.0, rgba(255, 255, 255, 0.0)), (0.5, rgba(255, 255, 255, 0.42)), (1.0, rgba(255, 255, 255, 0.0))],
-        );
-        let full = rounded_rect(0.0, 0.0, 256.0, 256.0, 1.0);
-        pm.fill_path(&full, &band, FillRule::Winding, at, Some(&mask));
+        let light = band(c, &[(0.0, rgba(255, 255, 255, 0.0)), (0.5, rgba(255, 255, 255, 0.62)), (1.0, rgba(255, 255, 255, 0.0))]);
+        let full = rounded_rect(0.0, 0.0, width, HEIGHT, 1.0);
+        pm.fill_path(&full, &light, FillRule::Winding, screen, Some(&mask));
     }
 
     let x = MARGIN + ICON + GAP;
     let baseline = HEIGHT * 0.5 + mark.cap * 0.5;
+    let at = Transform::from_translate(x, baseline).post_scale(SCALE, SCALE);
     let mut ink_paint = tiny_skia::Paint::default();
     ink_paint.set_color(ink);
     ink_paint.anti_alias = true;
-    pm.fill_path(&mark.path, &ink_paint, FillRule::Winding, Transform::from_translate(x, baseline).post_scale(SCALE, SCALE), None);
+    pm.fill_path(&mark.path, &ink_paint, FillRule::Winding, at, None);
+    if sweeping {
+        let mut mask = Mask::new(pm.width(), pm.height()).unwrap();
+        mask.fill_path(&mark.path, FillRule::Winding, true, at);
+        let glow = band(
+            c,
+            &[
+                (0.0, rgba(0x1b, 0xc8, 0xb4, 0.0)),
+                (0.3, rgba(0x1b, 0xc8, 0xb4, 0.9)),
+                (0.5, rgba(0x2f, 0x9b, 0xe8, 1.0)),
+                (0.7, rgba(0x33, 0x6e, 0xf2, 0.9)),
+                (1.0, rgba(0x33, 0x6e, 0xf2, 0.0)),
+            ],
+        );
+        let full = rounded_rect(0.0, 0.0, width, HEIGHT, 1.0);
+        pm.fill_path(&full, &glow, FillRule::Winding, screen, Some(&mask));
+    }
 
     let ex = x + mark.width;
     let accent = |a: f32| gradient((ex, 0.0), (ex + TAIL, HEIGHT), &[(0.0, rgba(0x1b, 0xc8, 0xb4, a)), (1.0, rgba(0x33, 0x6e, 0xf2, a))]);
     let sky = baseline - mark.cap;
-    let stars = [(ex + 30.0, sky + 10.0, 17.0, 0.30, 0.62), (ex + 52.0, sky + 40.0, 9.0, 0.48, 0.80), (ex + 24.0, sky + 52.0, 5.5, 0.64, 0.96)];
-    for (i, (cx, cy, r, from, to)) in stars.into_iter().enumerate() {
-        let p = bump(t, from, to);
-        let a = 0.5 + 0.5 * p;
-        let r = r * (0.72 + 0.28 * p);
-        let t2 = Transform::from_scale(SCALE, SCALE);
+    let stars = [(ex + 30.0, sky + 10.0, 17.0, 0.44), (ex + 54.0, sky + 40.0, 9.0, 0.53), (ex + 24.0, sky + 52.0, 5.5, 0.62)];
+    for (i, (cx, cy, r, from)) in stars.into_iter().enumerate() {
+        let p = bump(t, from, from + TWINKLE);
+        let a = 0.78 + 0.22 * p;
+        let r = r * (0.86 + 0.42 * p);
+        let spin = Transform::from_rotate_at(90.0 * ease((t - from) / TWINKLE), cx, cy).post_scale(SCALE, SCALE);
+        if p > 0.0 {
+            let mut halo = tiny_skia::Paint::default();
+            halo.shader = RadialGradient::new(
+                Point::from_xy(cx, cy),
+                0.0,
+                Point::from_xy(cx, cy),
+                r * 1.5,
+                vec![GradientStop::new(0.0, rgba(0x2f, 0x9b, 0xe8, 0.32 * p)), GradientStop::new(1.0, rgba(0x2f, 0x9b, 0xe8, 0.0))],
+                SpreadMode::Pad,
+                Transform::identity(),
+            )
+            .unwrap();
+            halo.anti_alias = true;
+            pm.fill_path(&PathBuilder::from_circle(cx, cy, r * 1.5).unwrap(), &halo, FillRule::Winding, screen, None);
+        }
         if i == 2 {
-            pm.fill_path(&PathBuilder::from_circle(cx, cy, r * 0.62).unwrap(), &accent(a), FillRule::Winding, t2, None);
+            pm.fill_path(&PathBuilder::from_circle(cx, cy, r * 0.62).unwrap(), &accent(a), FillRule::Winding, screen, None);
         } else {
-            pm.fill_path(&sparkle(cx, cy, r, 0.17), &accent(a), FillRule::Winding, t2, None);
+            pm.fill_path(&sparkle(cx, cy, r, 0.17), &accent(a), FillRule::Winding, spin, None);
         }
     }
     pm
