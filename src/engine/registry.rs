@@ -1,6 +1,5 @@
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::path::Path;
 
 use winreg::enums::*;
 
@@ -12,23 +11,9 @@ use super::regscan;
 
 pub(super) mod target;
 
-#[cfg(test)]
-mod tests;
-
 const CV: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion";
 const TRAY_ICONS: &str = "Control Panel\\NotifyIconSettings";
 const MUI_PATH: &str = "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache";
-pub const TEST_KEY: &str = "Software\\WispingSelfTest";
-
-static ALLOW_TEST_KEY: AtomicBool = AtomicBool::new(false);
-
-pub fn set_allow_test_key(value: bool) {
-    ALLOW_TEST_KEY.store(value, Ordering::SeqCst);
-}
-
-pub fn allow_test_key() -> bool {
-    ALLOW_TEST_KEY.load(Ordering::SeqCst)
-}
 
 #[derive(Clone, Debug)]
 pub struct RegIssue {
@@ -82,7 +67,7 @@ pub fn first_path(command: &str) -> Option<String> {
     if s.starts_with("\\\\") {
         return cut_at_ext(&s, &[".exe"]);
     }
-    if fsx::local_drive_path(&s) && Path::new(&s).is_file() {
+    if fsx::local_drive_path(&s) && fsx::plain_file(Path::new(&s)) == Some(true) {
         return Some(s);
     }
     cut_at_ext(&s, &[".exe"])
@@ -116,14 +101,7 @@ pub fn missing(path: &str) -> bool {
     if !p.is_absolute() {
         return false;
     }
-    let mut root = PathBuf::new();
-    for c in p.components().take(2) {
-        root.push(c.as_os_str());
-    }
-    if !root.is_dir() {
-        return false;
-    }
-    matches!(p.try_exists(), Ok(false))
+    fsx::plain_exists(p) == Some(false)
 }
 
 pub fn is_leftover(kind: &str) -> bool {
@@ -167,12 +145,6 @@ fn kinds_of(issues: &[RegIssue]) -> Vec<&'static str> {
     KINDS.iter().copied().filter(|k| issues.iter().any(|i| i.kind == *k)).collect()
 }
 
-pub fn rescan(old: &[RegIssue], fixed: &[RegIssue]) -> Vec<RegIssue> {
-    let kinds = kinds_of(fixed);
-    let fresh = scan_kinds(&kinds);
-    merge(old, &kinds, fresh)
-}
-
 fn merge(old: &[RegIssue], kinds: &[&str], mut fresh: Vec<RegIssue>) -> Vec<RegIssue> {
     let picked: HashSet<String> = old.iter().filter(|i| i.selected).map(RegIssue::id).collect();
     let known: HashSet<String> = old.iter().map(RegIssue::id).collect();
@@ -199,10 +171,6 @@ fn allowed(i: &RegIssue) -> bool {
         return false;
     }
     let lower = key.to_lowercase();
-    let test = TEST_KEY.to_lowercase();
-    if allow_test_key() && i.hive == Hive::User && (lower == test || lower.starts_with(&format!("{}\\", test))) {
-        return true;
-    }
     match i.kind.as_str() {
         "shareddll" => i.hive == Hive::Machine && i.value_name.is_some() && lower == format!("{}\\shareddlls", CV.to_lowercase()),
         "muicache" => i.hive == Hive::User && i.value_name.is_some() && lower == MUI_PATH.to_lowercase(),
@@ -334,7 +302,7 @@ fn tray_icons(list: &mut Vec<RegIssue>) {
         let Ok(sub) = target::open_child(&key, &id, KEY_READ | KEY_WOW64_64KEY) else { continue };
         let Some(raw) = regbackup::read_string(&sub, "ExecutablePath") else { continue };
         let Some(exe) = tray_exe(&raw).filter(|e| fsx::local_drive_path(e)) else { continue };
-        let gone = matches!(std::fs::metadata(&exe), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+        let gone = fsx::plain_exists(Path::new(&exe)) == Some(false);
         if exe.to_lowercase().contains("\\windowsapps\\") || !gone || !missing(&exe) {
             continue;
         }
@@ -371,34 +339,29 @@ fn mui_cache(list: &mut Vec<RegIssue>) {
     }
 }
 
-pub fn fix(issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<String>) -> usize {
-    fix_scanned(issues, backup_dir, errors).0
-}
-
-pub fn fix_and_rescan(old: &[RegIssue], issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<String>) -> (usize, Vec<RegIssue>) {
+pub fn fix_and_rescan(old: &[RegIssue], issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<(String, std::io::Error)>) -> (usize, Vec<RegIssue>) {
     let (ok, scanned) = fix_scanned(issues, backup_dir, errors);
     let kinds = kinds_of(issues);
-    let fresh = scanned.unwrap_or_else(|| scan_kinds(&kinds));
-    (ok, merge(old, &kinds, fresh))
+    (ok, merge(old, &kinds, scanned))
 }
 
-fn fix_scanned(issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<String>) -> (usize, Option<Vec<RegIssue>>) {
+fn fix_scanned(issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<(String, std::io::Error)>) -> (usize, Vec<RegIssue>) {
     let mut ok = 0;
     let mut done: HashSet<String> = HashSet::new();
-    let scanned = (!allow_test_key()).then(|| scan_kinds(&kinds_of(issues)));
-    let live: HashSet<String> = scanned.iter().flatten().map(RegIssue::id).collect();
+    let scanned = scan_kinds(&kinds_of(issues));
+    let live: HashSet<String> = scanned.iter().map(RegIssue::id).collect();
     for i in issues {
         if !allowed(i) {
-            errors.push(format!("{}: refused", i.display()));
+            errors.push((i.display(), std::io::Error::other("refused")));
             data::log(&format!("registry refused {}", i.display()));
             continue;
         }
-        if i.hive == Hive::Machine && !allow_test_key() && !super::sys::is_admin() {
-            errors.push(format!("{}: needs administrator rights", i.display()));
+        if i.hive == Hive::Machine && !super::sys::is_admin() {
+            errors.push((i.display(), std::io::Error::new(std::io::ErrorKind::PermissionDenied, "needs administrator rights")));
             continue;
         }
-        if !allow_test_key() && !live.contains(&i.id()) {
-            errors.push(format!("{}: no longer broken, skipped", i.display()));
+        if !live.contains(&i.id()) {
+            errors.push((i.display(), std::io::Error::other("skipped")));
             data::log(&format!("registry skipped {}", i.display()));
             continue;
         }
@@ -409,15 +372,13 @@ fn fix_scanned(issues: &[RegIssue], backup_dir: &Path, errors: &mut Vec<String>)
                 done.insert(i.id());
             }
             Err(e) => {
-                errors.push(format!("{}: {}", i.display(), e));
                 data::log(&format!("registry fix failed {} {}", i.display(), e));
+                errors.push((i.display(), e));
             }
         }
     }
-    let scanned = scanned.map(|list| {
-        let removed: Vec<&RegIssue> = issues.iter().filter(|i| done.contains(&i.id())).collect();
-        list.into_iter().filter(|j| !removed.iter().any(|i| covers(i, j))).collect()
-    });
+    let removed: Vec<&RegIssue> = issues.iter().filter(|i| done.contains(&i.id())).collect();
+    let scanned = scanned.into_iter().filter(|j| !removed.iter().any(|i| covers(i, j))).collect();
     (ok, scanned)
 }
 

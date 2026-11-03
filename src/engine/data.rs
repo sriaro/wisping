@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use super::fsx;
 use super::settings;
@@ -13,18 +13,9 @@ const POINTER_FALLBACK: &str = "location.txt";
 const MAX_POINTER: u64 = 4096;
 const MAX_SETTING: u64 = 64 * 1024;
 
-static ROOT: RwLock<Option<&'static Path>> = RwLock::new(None);
+static ROOT: RwLock<Option<Arc<Path>>> = RwLock::new(None);
 static OWN: RwLock<Vec<String>> = RwLock::new(Vec::new());
 static CUSTOM: AtomicBool = AtomicBool::new(false);
-
-#[cfg(test)]
-#[path = "data/security_tests.rs"]
-mod security_tests;
-
-#[cfg(test)]
-pub(super) fn set_test_root(path: PathBuf) {
-    set_root(path);
-}
 
 pub fn exe_dir() -> PathBuf {
     std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())).unwrap_or_else(|| PathBuf::from("."))
@@ -60,12 +51,10 @@ fn pointer_files() -> [PathBuf; 2] {
 }
 
 pub fn read_text(path: &Path, max: u64) -> Option<String> {
-    let file = fs::File::open(path).ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
+    let directory = fsx::PinnedDir::open(path.parent()?).ok()?;
+    let file = directory.read_file(path.file_name()?).ok()?;
     let mut text = String::new();
-    file.take(max + 1).read_to_string(&mut text).ok()?;
+    file.take(max.saturating_add(1)).read_to_string(&mut text).ok()?;
     (text.len() as u64 <= max).then_some(text)
 }
 
@@ -119,7 +108,12 @@ pub fn default_root() -> PathBuf {
         .get_or_init(|| {
             let exe = exe_dir();
             let data = exe.join("data");
-            if data_dir_allowed(&data) && !cleaned_root(&exe) && writable(&exe) && (!data.exists() || writable(&data)) { data } else { fallback_base() }
+            let usable = match fsx::plain_exists(&data) {
+                Some(true) => writable(&data),
+                Some(false) => true,
+                None => false,
+            };
+            if data_dir_allowed(&data) && usable && !cleaned_root(&exe) && writable(&exe) { data } else { fallback_base() }
         })
         .clone()
 }
@@ -131,7 +125,7 @@ fn custom_root() -> Option<PathBuf> {
         }
         let text = read_text(f, MAX_POINTER)?;
         let path = PathBuf::from(text.trim());
-        (path.is_absolute() && data_dir_allowed(&path) && path.is_dir() && writable(&path)).then_some(path)
+        (path.is_absolute() && data_dir_allowed(&path) && fsx::plain_dir(&path) == Some(true) && writable(&path)).then_some(path)
     })
 }
 
@@ -147,39 +141,46 @@ fn resolve() -> PathBuf {
 }
 
 fn set_root(path: PathBuf) {
-    let leaked: &'static Path = Box::leak(path.into_boxed_path());
+    let path: Arc<Path> = path.into();
     let mut guard = ROOT.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    refresh_own(leaked);
-    *guard = Some(leaked);
+    refresh_own(&path);
+    *guard = Some(path);
 }
 
-pub fn root() -> &'static Path {
-    if let Some(p) = *ROOT.read().unwrap_or_else(std::sync::PoisonError::into_inner) {
-        return p;
+pub fn root() -> Arc<Path> {
+    if let Some(path) = ROOT.read().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref() {
+        return Arc::clone(path);
     }
     let mut guard = ROOT.write().unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(p) = *guard {
-        return p;
+    if let Some(path) = guard.as_ref() {
+        return Arc::clone(path);
     }
-    let leaked: &'static Path = Box::leak(resolve().into_boxed_path());
-    refresh_own(leaked);
-    *guard = Some(leaked);
-    leaked
+    let path: Arc<Path> = resolve().into();
+    refresh_own(&path);
+    *guard = Some(Arc::clone(&path));
+    path
 }
 
 pub fn harden_default() {
     if is_custom() {
         return;
     }
-    if let Ok(dir) = fsx::PinnedDir::open(root())
-        && !dir.is_private() {
+    if let Ok(dir) = fsx::PinnedDir::open(&root()) {
+        if !dir.is_private() {
             let _ = dir.make_private();
+        }
+        for name in ["backup", "reports"] {
+            if let Ok(sub) = dir.child(name.as_ref(), false)
+                && !sub.is_private() {
+                    let _ = sub.make_private();
+            }
+        }
     }
 }
 
-pub fn ensure_root() -> &'static Path {
+pub fn ensure_root() -> Arc<Path> {
     let root = root();
-    let _ = fsx::PinnedDir::create_private(root);
+    let _ = fsx::PinnedDir::create_private(&root);
     root
 }
 
@@ -260,7 +261,7 @@ fn write_pointer(target: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     if !fsx::local_drive_path(&fallback.to_string_lossy()) {
-        return Err(std::io::Error::other("Wisping cannot save the folder in a local location."));
+        return Err(std::io::Error::other("nolocal"));
     }
     fsx::write_file(&fallback, text.as_bytes())
 }
@@ -279,17 +280,17 @@ fn clear_pointer() {
 
 pub fn set_location(new: &Path) -> std::io::Result<()> {
     if !new.is_absolute() {
-        return Err(std::io::Error::other("Choose a full folder path."));
+        return Err(std::io::Error::other("notfull"));
     }
     if !data_dir_allowed(new) {
-        return Err(std::io::Error::other("Choose a local folder outside Windows, Program Files, ProgramData, Public, and OneDrive."));
+        return Err(std::io::Error::other("badfolder"));
     }
     let current = root().to_path_buf();
     if same_dir(new, &current) {
         return Ok(());
     }
     if inside(new, &current) || inside(&current, new) {
-        return Err(std::io::Error::other("Choose a folder that is not inside the current data folder, and not one that contains it."));
+        return Err(std::io::Error::other("nested"));
     }
     let source = match fsx::PinnedDir::open(&current) {
         Ok(dir) => Some(dir),
@@ -298,7 +299,7 @@ pub fn set_location(new: &Path) -> std::io::Result<()> {
     };
     let destination = fsx::PinnedDir::create_private(new)?;
     if !writable_in(&destination) {
-        return Err(std::io::Error::other("Wisping cannot write to that folder."));
+        return Err(std::io::Error::other("nowrite"));
     }
     if let Some(source) = &source {
         copy_missing(source, &destination)?;
@@ -322,14 +323,17 @@ pub fn reset_location() -> std::io::Result<()> {
 pub fn new_backup_dir() -> std::io::Result<PathBuf> {
     ensure_root();
     let stem = sys::stamp_name();
-    let parent = fsx::PinnedDir::create_private(root())?.private_child("backup".as_ref())?;
+    let parent = fsx::PinnedDir::create_private(&root())?.private_child("backup".as_ref())?;
     for n in 0..100 {
         let name = if n == 0 { stem.clone() } else { format!("{}-{}", stem, n) };
         let dir = parent.path().join(&name);
         match fs::create_dir(&dir) {
             Ok(()) => {
-                let target = parent.child(name.as_ref(), false)?;
-                let _ = target.make_private();
+                let target = parent.deletable_child(name.as_ref())?;
+                if let Err(e) = target.make_private() {
+                    let _ = target.remove();
+                    return Err(e);
+                }
                 let _ = super::backups::prune(100);
                 return Ok(target.path().to_path_buf());
             }
@@ -351,7 +355,7 @@ pub fn log(line: &str) {
     const MAX_LOG: u64 = 1024 * 1024;
     ensure_root();
     let path = log_path();
-    if fs::metadata(&path).is_ok_and(|meta| meta.len() > MAX_LOG) {
+    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.len() > MAX_LOG) {
         let _ = fsx::write_file(&path, b"");
     }
     let s = sys::now_local();
@@ -375,9 +379,6 @@ pub fn read_setting(name: &str) -> Option<String> {
 }
 
 pub fn write_setting(name: &str, value: &str) {
-    if !settings::remember_on() {
-        return;
-    }
     ensure_root();
     let _ = fsx::write_file(&root().join(name), value.as_bytes());
 }

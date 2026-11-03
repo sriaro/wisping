@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::{Kind, Tree, NONE};
 use crate::engine::fsx;
@@ -31,15 +32,24 @@ fn app_roots() -> Vec<String> {
     v
 }
 
-pub fn build(tree: &Tree) -> Owners {
+pub fn build(tree: &Tree, cancel: &AtomicBool) -> Option<Owners> {
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     let exact: HashMap<String, String> = programs::install_dirs().into_iter().collect();
     let roots = app_roots();
     let mut owners = Owners::default();
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut stack: Vec<(u32, String)> = vec![(0, tree.root.to_string_lossy().trim_end_matches('\\').to_lowercase())];
     while let Some((idx, path)) = stack.pop() {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let under_root = roots.contains(&path);
         for c in tree.children(idx) {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
             let n = &tree.nodes[c as usize];
             if n.kind != Kind::Dir {
                 continue;
@@ -68,6 +78,9 @@ pub fn build(tree: &Tree) -> Owners {
             }
         }
     }
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     let mut order: Vec<usize> = (0..owners.list.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(owners.list[i].size));
     let mut pos = vec![0usize; order.len()];
@@ -79,7 +92,7 @@ pub fn build(tree: &Tree) -> Owners {
     }
     let mut taken: Vec<Option<Owner>> = std::mem::take(&mut owners.list).into_iter().map(Some).collect();
     owners.list = order.iter().filter_map(|&i| taken[i].take()).collect();
-    owners
+    (!cancel.load(Ordering::Relaxed)).then_some(owners)
 }
 
 impl Owners {
@@ -93,5 +106,4 @@ impl Owners {
         }
         None
     }
-
 }

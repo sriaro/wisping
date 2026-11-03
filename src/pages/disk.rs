@@ -27,6 +27,7 @@ struct State {
     tree: Option<Arc<Tree>>,
     owners: Option<Arc<Owners>>,
     owners_running: bool,
+    owner_cancel: Arc<AtomicBool>,
     groups: Arc<Vec<Group>>,
     group_of: HashMap<u32, usize>,
     dups_ready: bool,
@@ -45,6 +46,33 @@ struct State {
     scanning: bool,
     partial: bool,
     poll: Option<Timer>,
+}
+
+impl State {
+    fn reset_results(&mut self) {
+        self.scan_id = self.scan_id.wrapping_add(1);
+        self.dup_cancel.store(true, Ordering::Relaxed);
+        self.owner_cancel.store(true, Ordering::Relaxed);
+        if let Some(progress) = self.progress.take() {
+            progress.cancel.store(true, Ordering::Relaxed);
+        }
+        self.poll = None;
+        self.tree = None;
+        self.owners = None;
+        self.groups = Arc::default();
+        self.group_of = HashMap::new();
+        self.largest = Vec::new();
+        self.crumb_ids = Vec::new();
+        self.scanning = false;
+        self.partial = false;
+        self.owners_running = false;
+        self.dups_ready = false;
+        self.dups_running = false;
+        self.current = 0;
+        self.selected = None;
+        self.dup_open = None;
+        self.owner_open = None;
+    }
 }
 
 type ListKey = (i32, Option<usize>, Option<usize>, u32, u64, usize, bool);
@@ -79,10 +107,16 @@ fn locations() -> Vec<(String, PathBuf)> {
         }
     }
     if let Some(p) = crate::engine::winenv::var("USERPROFILE") {
-        v.push((i18n::get("disk.loc.user"), PathBuf::from(p)));
+        let path = PathBuf::from(p);
+        if crate::engine::fsx::local_drive_path(&path.to_string_lossy()) {
+            v.push((i18n::get("disk.loc.user"), path));
+        }
     }
     if let Some(p) = crate::engine::winenv::var("LOCALAPPDATA") {
-        v.push((i18n::get("disk.loc.appdata"), PathBuf::from(p)));
+        let path = PathBuf::from(p);
+        if crate::engine::fsx::local_drive_path(&path.to_string_lossy()) {
+            v.push((i18n::get("disk.loc.appdata"), path));
+        }
     }
     v
 }
@@ -281,10 +315,11 @@ fn begin_dups(ui: &MainWindow, s: &mut State) {
     let id = s.scan_id;
     let weak = ui.as_weak();
     s.dups_running = true;
-    std::thread::spawn(move || {
+    crate::engine::pool::spawn(move || {
+        let running = cancel.clone();
         let _reset = crate::app::panic_reset(&weak, move |ui| {
             with(|s| {
-                if s.scan_id == id {
+                if s.scan_id == id && Arc::ptr_eq(&s.dup_cancel, &running) {
                     s.dups_running = false;
                     push_list(ui, s);
                 }
@@ -297,7 +332,7 @@ fn begin_dups(ui: &MainWindow, s: &mut State) {
         let _ = weak.upgrade_in_event_loop(move |ui| {
             crate::winui::trim_soon();
             with(|s| {
-                if s.scan_id != id {
+                if s.scan_id != id || cancel.load(Ordering::Relaxed) || !Arc::ptr_eq(&s.dup_cancel, &cancel) {
                     return;
                 }
                 s.group_of = groups.iter().enumerate().flat_map(|(gi, g)| g.members.iter().map(move |&m| (m, gi))).collect();
@@ -317,8 +352,10 @@ fn begin_owners(ui: &MainWindow, s: &mut State) {
     }
     let Some(tree) = s.tree.as_ref().cloned() else { return };
     let weak = ui.as_weak();
+    s.owner_cancel = Arc::new(AtomicBool::new(false));
+    let cancel = s.owner_cancel.clone();
     s.owners_running = true;
-    std::thread::spawn(move || {
+    crate::engine::pool::spawn(move || {
         let built = tree.clone();
         let _reset = crate::app::panic_reset(&weak, move |ui| {
             with(|s| {
@@ -328,10 +365,10 @@ fn begin_owners(ui: &MainWindow, s: &mut State) {
                 }
             })
         });
-        let owners = Arc::new(owners::build(&tree));
+        let Some(owners) = owners::build(&tree, &cancel).map(Arc::new) else { return };
         let _ = weak.upgrade_in_event_loop(move |ui| {
             with(|s| {
-                if !s.tree.as_ref().is_some_and(|t| Arc::ptr_eq(t, &tree)) {
+                if cancel.load(Ordering::Relaxed) || !s.tree.as_ref().is_some_and(|t| Arc::ptr_eq(t, &tree)) {
                     return;
                 }
                 s.owners = Some(owners);
@@ -510,16 +547,8 @@ fn start_scan(c: &Ctx) {
             return None;
         }
         let root = s.locations.get(s.location)?.1.clone();
-        s.scan_id += 1;
+        s.reset_results();
         s.scanning = true;
-        s.partial = false;
-        s.dup_cancel.store(true, Ordering::Relaxed);
-        s.dup_cancel = Arc::new(AtomicBool::new(false));
-        s.dups_running = false;
-        s.tree = None;
-        s.owners = None;
-        s.owners_running = false;
-        s.selected = None;
         push_all(&ui, s);
         let progress = Arc::new(Progress::default());
         s.progress = Some(progress.clone());
@@ -543,7 +572,7 @@ fn start_scan(c: &Ctx) {
         });
     }
     with(|s| s.poll = Some(poll));
-    std::thread::spawn(move || {
+    crate::engine::pool::spawn(move || {
         let _reset = crate::app::panic_reset(&weak, move |ui| {
             with(|s| {
                 if s.scan_id == id {
@@ -553,10 +582,8 @@ fn start_scan(c: &Ctx) {
                 }
             })
         });
-        let tree = diskmap::scan(&root, &progress);
-        let cancelled = progress.cancel.load(Ordering::Relaxed);
-        let tree = Arc::new(tree);
-        let largest = tree.largest_files(MAX_ROWS);
+        let tree = diskmap::scan(&root, &progress).map(Arc::new);
+        let largest = tree.as_ref().map(|tree| tree.largest_files(MAX_ROWS, &progress.cancel)).unwrap_or_default();
         let _ = weak.upgrade_in_event_loop(move |ui| {
             crate::winui::trim_soon();
             with(|s| {
@@ -565,7 +592,7 @@ fn start_scan(c: &Ctx) {
                 }
                 s.scanning = false;
                 s.poll = None;
-                if !cancelled {
+                if let Some(tree) = tree.filter(|_| !progress.cancel.load(Ordering::Relaxed)) {
                     s.tree = Some(tree);
                     s.owners = None;
                     s.owners_running = false;
@@ -622,11 +649,11 @@ pub fn install(c: &Ctx) {
                 if s.scanning {
                     return;
                 }
+                if i < 0 || i as usize >= s.locations.len() || i as usize == s.location {
+                    return;
+                }
+                s.reset_results();
                 s.location = i as usize;
-                s.tree = None;
-                s.owners = None;
-                s.owners_running = false;
-                s.selected = None;
                 push_all(&ui, s);
             });
             ui.global::<DiskState>().set_hover_text("".into());
@@ -832,28 +859,6 @@ pub fn install(c: &Ctx) {
                 push_list(&ui, s);
             });
         }
-    });
-}
-
-pub fn preview(ui: &MainWindow, root: PathBuf, select_largest: bool) {
-    let progress = Progress::default();
-    let tree = Arc::new(diskmap::scan(&root, &progress));
-    let owners = Arc::new(owners::build(&tree));
-    let groups = dups::find(&tree, &AtomicBool::new(false));
-    with(|s| {
-        s.locations = locations();
-        let names: Vec<slint::SharedString> = s.locations.iter().map(|(n, _)| n.as_str().into()).collect();
-        ui.global::<DiskState>().set_locations(ModelRc::new(VecModel::from(names)));
-        s.location = 0;
-        s.largest = tree.largest_files(MAX_ROWS);
-        s.group_of = groups.iter().enumerate().flat_map(|(gi, g)| g.members.iter().map(move |&m| (m, gi))).collect();
-        s.groups = Arc::new(groups);
-        s.dups_ready = true;
-        s.owners = Some(owners);
-        s.tree = Some(tree);
-        s.current = 0;
-        s.selected = if select_largest { s.largest.first().copied() } else { None };
-        push_all(ui, s);
     });
 }
 

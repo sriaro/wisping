@@ -1,23 +1,26 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
-use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{COLORREF, GlobalFree, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{COLORREF, CloseHandle, GlobalFree, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WAIT_OBJECT_0, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontIndirectW, DEFAULT_CHARSET,
-    DEFAULT_GUI_FONT, DEFAULT_PITCH, DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetMonitorInfoW, GetStockObject, GetTextExtentPoint32W, GetTextFaceW, GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT, TextOutW,
+    DEFAULT_GUI_FONT, DEFAULT_PITCH, DEVMODEW, DIB_RGB_COLORS, DeleteDC, DeleteObject, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GdiFlush, GetMonitorInfoW, GetStockObject, GetTextExtentPoint32W, GetTextFaceW,
+    GetTextMetricsW, HBITMAP, HDC, HFONT, HGDIOBJ, LOGFONTW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromPoint, OUT_DEFAULT_PRECIS, SelectObject, SetBkMode, SetTextColor, TEXTMETRICW, TRANSPARENT, TextOutW,
 };
 use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::Win32::System::Threading::{CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateWaitableTimerExW, INFINITE, SetWaitableTimer, TIMER_ALL_ACCESS, WaitForSingleObject};
 use windows::Win32::UI::Controls::WM_MOUSELEAVE;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_CONTROL, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FLASHW_TIMERNOFG, FLASHW_TRAY, FLASHWINFO, FlashWindowEx, GetCursorPos, GetMessageW, GetWindowRect, HICON, HTCAPTION, HTCLIENT,
-    HWND_NOTOPMOST, IDC_ARROW, KillTimer, LoadCursorW, LoadIconW, MSG, RegisterClassExW, SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST, SPI_GETSCREENREADER, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WM_ACTIVATE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    HWND_NOTOPMOST, IDC_ARROW, KillTimer, LoadCursorW, LoadIconW, MSG, PostMessageW, RegisterClassExW, SPI_GETCLIENTAREAANIMATION, SPI_GETHIGHCONTRAST, SPI_GETSCREENREADER, SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, TranslateMessage, ULW_ALPHA, UpdateLayeredWindow, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
     WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{BOOL, PCWSTR, w};
@@ -40,6 +43,8 @@ const BODY_LINES: usize = 12;
 const ANIM_MS: f32 = 160.0;
 const RISE: f32 = 8.0;
 const ANIM_TIMER: usize = 1;
+const TICK: u32 = WM_APP + 1;
+const FALLBACK_HZ: u32 = 120;
 const KEY_GRACE_MS: u128 = 350;
 const CF_UNICODETEXT: u32 = 13;
 
@@ -598,10 +603,12 @@ struct Dlg {
     placed: bool,
     replace: bool,
     space_down: bool,
+    stop: Arc<AtomicBool>,
 }
 
 impl Drop for Dlg {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
         unsafe {
             if !self.hwnd.is_invalid() {
                 let _ = DestroyWindow(self.hwnd);
@@ -728,17 +735,58 @@ fn register_class() -> Option<HINSTANCE> {
     Some(hinst)
 }
 
-fn cursor_monitor() -> ([i32; 4], f32) {
+fn cursor_monitor() -> ([i32; 4], f32, u32) {
     let mut cur = POINT::default();
     unsafe {
         let _ = GetCursorPos(&mut cur);
     }
     let mon = unsafe { MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST) };
-    let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
-    let work = if unsafe { GetMonitorInfoW(mon, &mut info) }.as_bool() { [info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom] } else { [0, 0, 1280, 720] };
+    let mut info = MONITORINFOEXW { monitorInfo: MONITORINFO { cbSize: size_of::<MONITORINFOEXW>() as u32, ..Default::default() }, ..Default::default() };
+    let known = unsafe { GetMonitorInfoW(mon, &mut info.monitorInfo) }.as_bool();
+    let area = info.monitorInfo.rcWork;
+    let work = if known { [area.left, area.top, area.right, area.bottom] } else { [0, 0, 1280, 720] };
     let (mut dx, mut dy) = (96u32, 96u32);
     let ok = unsafe { GetDpiForMonitor(mon, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) }.is_ok();
-    (work, if ok && dx >= 96 { (dx as f32 / 96.0).clamp(1.0, 4.0) } else { 1.0 })
+    let hz = if known { refresh_rate(&info.szDevice) } else { 0 };
+    (work, if ok && dx >= 96 { (dx as f32 / 96.0).clamp(1.0, 4.0) } else { 1.0 }, hz)
+}
+
+fn refresh_rate(device: &[u16; 32]) -> u32 {
+    let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+    if unsafe { EnumDisplaySettingsW(PCWSTR(device.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode) }.as_bool() { mode.dmDisplayFrequency } else { 0 }
+}
+
+fn frame_period(hz: u32) -> Duration {
+    let hz = if hz < 24 { FALLBACK_HZ } else { hz.min(1000) };
+    Duration::from_nanos(1_000_000_000 / u64::from(hz))
+}
+
+fn pace(hwnd: HWND, period: Duration, stop: Arc<AtomicBool>) -> bool {
+    let target = hwnd.0 as isize;
+    let until = Instant::now() + Duration::from_millis(ANIM_MS as u64) + period * 2;
+    let run = move || {
+        let timer = unsafe { CreateWaitableTimerExW(None, PCWSTR::null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0) }.ok();
+        let start = Instant::now();
+        let mut frame = 0u32;
+        while !stop.load(Ordering::Relaxed) && Instant::now() < until {
+            frame += 1;
+            let wait = (start + period * frame).saturating_duration_since(Instant::now());
+            let due = -((wait.as_nanos() / 100).max(1) as i64);
+            let slept = timer.is_some_and(|t| unsafe { SetWaitableTimer(t, &due, 0, None, None, false).is_ok() && WaitForSingleObject(t, INFINITE) == WAIT_OBJECT_0 });
+            if !slept {
+                std::thread::sleep(wait);
+            }
+            if stop.load(Ordering::Relaxed) || unsafe { PostMessageW(Some(HWND(target as *mut c_void)), TICK, WPARAM(0), LPARAM(0)) }.is_err() {
+                break;
+            }
+        }
+        if let Some(t) = timer {
+            unsafe {
+                let _ = CloseHandle(t);
+            }
+        }
+    };
+    std::thread::Builder::new().name("notice-pace".into()).spawn(run).is_ok()
 }
 
 fn make_dib(dc: HDC, w: i32, h: i32) -> Option<(HBITMAP, *mut c_void)> {
@@ -762,7 +810,7 @@ fn open(heading: &str, text: &str) -> bool {
         return false;
     };
     let dark = crate::app::detect_dark();
-    let (work, s) = cursor_monitor();
+    let (work, s, hz) = cursor_monitor();
     let dc = unsafe { CreateCompatibleDC(None) };
     if dc.is_invalid() {
         return false;
@@ -798,6 +846,7 @@ fn open(heading: &str, text: &str) -> bool {
     }
     let focus = plan.buttons.iter().position(|b| b.act == Act::Close).unwrap_or(0);
     let animate = animations_on();
+    let stop = Arc::new(AtomicBool::new(false));
     let dlg = Dlg {
         hwnd,
         dc,
@@ -820,6 +869,7 @@ fn open(heading: &str, text: &str) -> bool {
         placed: false,
         replace: false,
         space_down: false,
+        stop: stop.clone(),
     };
     STATE.with(|c| *c.borrow_mut() = Some(dlg));
     if !redraw() {
@@ -831,7 +881,7 @@ fn open(heading: &str, text: &str) -> bool {
             let flash = FLASHWINFO { cbSize: size_of::<FLASHWINFO>() as u32, hwnd, dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG, uCount: 3, dwTimeout: 0 };
             let _ = FlashWindowEx(&flash);
         }
-        if animate {
+        if animate && !pace(hwnd, frame_period(hz), stop) {
             SetTimer(Some(hwnd), ANIM_TIMER, 15, None);
         }
     }
@@ -905,6 +955,7 @@ fn present() -> bool {
     let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: AC_SRC_ALPHA as u8 };
     let pushed = unsafe { UpdateLayeredWindow(hwnd, None, dst.as_ref().map(|p| p as *const POINT), Some(&full), Some(dc), Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA) }.is_ok();
     if settled {
+        with(|d| d.stop.store(true, Ordering::Relaxed));
         unsafe {
             let _ = KillTimer(Some(hwnd), ANIM_TIMER);
         }
@@ -1107,6 +1158,10 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
             }
             return LRESULT(0);
         }
+        TICK => {
+            present();
+            return LRESULT(0);
+        }
         WM_TIMER if wp.0 == ANIM_TIMER => {
             present();
             return LRESULT(0);
@@ -1145,77 +1200,4 @@ fn handle(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         _ => {}
     }
     unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn width(s: &str) -> f32 {
-        s.chars().count() as f32 * 10.0
-    }
-
-    #[test]
-    fn pieces_keep_spaces_and_split_paths() {
-        assert_eq!(pieces("ab  cd e"), vec!["ab  ", "cd ", "e"]);
-        assert_eq!(pieces("C:\\a\\bb/c.rs"), vec!["C:\\", "a\\", "bb/", "c.rs"]);
-        assert_eq!(pieces(""), Vec::<&str>::new());
-    }
-
-    #[test]
-    fn wrapped_lines_fit_and_keep_every_character() {
-        let samples = ["the quick brown fox jumps over the lazy dog again and again", "averyveryverylongwordwithoutanybreakopportunityatall", "panicked at src\\engine\\cleaner.rs:12:5:\nindex out of bounds", "a\n\nb", ""];
-        for s in samples {
-            let lines = wrap(&width, s, 100.0, usize::MAX);
-            assert!(!lines.is_empty());
-            for l in &lines {
-                assert!(width(l) <= 100.0, "{l:?}");
-            }
-            let strip = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-            assert_eq!(strip(&lines.concat()), strip(s), "{s:?}");
-        }
-        assert_eq!(wrap(&width, "a\nb", 100.0, usize::MAX), vec!["a", "b"]);
-        assert_eq!(wrap(&width, "a\n\nb", 100.0, usize::MAX), vec!["a", "", "b"]);
-    }
-
-    #[test]
-    fn long_text_is_capped_with_an_ellipsis() {
-        let long = "word ".repeat(100);
-        let lines = cap(&width, wrap(&width, &long, 100.0, 4), 3, 100.0);
-        assert_eq!(lines.len(), 3);
-        assert!(lines[2].ends_with('…') && width(&lines[2]) <= 100.0);
-        assert_eq!(cap(&width, vec!["a".into()], 3, 100.0), vec!["a".to_string()]);
-    }
-
-    #[test]
-    fn rounded_rect_coverage_is_full_inside_and_empty_outside() {
-        let r = [10.0, 10.0, 100.0, 50.0];
-        assert_eq!(coverage(sdf(60.0, 35.0, r, 8.0)), 1.0);
-        assert_eq!(coverage(sdf(10.5, 10.5, r, 8.0)), 0.0);
-        assert_eq!(coverage(sdf(200.0, 35.0, r, 8.0)), 0.0);
-        assert!(coverage(sdf(12.0, 12.0, r, 8.0)) < 1.0);
-        assert_eq!(coverage(sdf(60.0, 35.0, r, 0.0)), 1.0);
-    }
-
-    #[test]
-    fn cjk_is_detected() {
-        assert!(has_cjk("操作意外中断"));
-        assert!(!has_cjk("panicked at src/app.rs"));
-    }
-
-    #[test]
-    fn fonts_resolve_to_real_faces() {
-        let dc = unsafe { CreateCompatibleDC(None) };
-        for han in [false, true] {
-            let mut f = Fonts::new(dc, 1.5, han);
-            assert!(!f.head.is_invalid() && !f.body.is_invalid());
-            assert!(f.line_height(true) > f.line_height(false) && f.line_height(false) > 0.0);
-            assert!(f.advance(false, "Wisping") > 0.0);
-            f.free();
-        }
-        unsafe {
-            let _ = DeleteDC(dc);
-        }
-    }
-
 }

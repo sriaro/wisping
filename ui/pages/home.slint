@@ -91,6 +91,7 @@ component Tile inherits Glass {
     in property <string> label;
     callback activated;
     hot: ta.has-hover;
+    press: ta.pressed;
     height: 105.5px;
     radius: 17.5px;
 
@@ -296,6 +297,7 @@ export component HomePage inherits PageFrame {
                 Glass {
                     radius: 17.5px;
                     hot: top-ta.has-hover;
+                    press: top-ta.pressed;
                     VerticalLayout {
                         padding: 16px;
                         padding-left: 20px;

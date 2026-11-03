@@ -16,24 +16,14 @@ readme = "README.md"
 license = "GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0"
 repository = "https://github.com/slint-ui/slint"
 
-[package.metadata.docs.rs]
-rustdoc-args = ["--generate-link-to-definition"]
-
 [features]
 default = []
 opengl = []
-unstable-wgpu-30 = [
-    "wgpu-30",
-    "i-slint-core/unstable-wgpu-30",
-]
-wgpu = ["wgpu-30"]
-wgpu-30 = [
-    "dep:wgpu-30",
-    "femtovg/wgpu",
-    "i-slint-core/wgpu-30",
-]
 
 [lib]
+test = false
+doctest = false
+bench = false
 name = "i_slint_renderer_femtovg"
 path = "lib.rs"
 
@@ -87,12 +77,6 @@ version = "1"
 [dependencies.rgb]
 version = "0.8.27"
 
-[dependencies.wgpu-30]
-version = "30"
-optional = true
-default-features = true
-package = "wgpu"
-
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.i-slint-core]
 version = "=1.18.1"
 features = [
@@ -100,31 +84,3 @@ features = [
     "svg",
 ]
 default-features = false
-
-[target.'cfg(target_arch = "wasm32")'.dependencies.wasm-bindgen]
-version = "0.2"
-
-[target.'cfg(target_arch = "wasm32")'.dependencies.web-sys]
-version = "0.3.72"
-features = [
-    "console",
-    "WebGlContextAttributes",
-    "CanvasRenderingContext2d",
-    "HtmlInputElement",
-    "HtmlCanvasElement",
-    "Window",
-    "Document",
-]
-default-features = false
-
-[target.'cfg(target_arch = "wasm32")'.dependencies.wgpu-30]
-version = "30"
-features = ["webgl"]
-optional = true
-default-features = false
-package = "wgpu"
-
-[lints.rust.unexpected_cfgs]
-level = "warn"
-priority = 0
-check-cfg = ["cfg(slint_nightly_test)"]

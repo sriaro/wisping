@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use windows::Win32::System::SystemInformation::{GetLogicalProcessorInformationEx, LOGICAL_PROCESSOR_RELATIONSHIP, RelationCache, RelationProcessorCore, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX};
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadInformation, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN, THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_EXECUTION_SPEED,
-    THREAD_POWER_THROTTLING_STATE, THREAD_PRIORITY_BELOW_NORMAL, ThreadPowerThrottling,
+    THREAD_MODE_BACKGROUND_END, THREAD_POWER_THROTTLING_STATE, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL, ThreadPowerThrottling,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -39,6 +39,10 @@ pub fn io_threads() -> usize {
     topology().logical.clamp(2, 16)
 }
 
+pub fn registry_threads() -> usize {
+    topology().logical.clamp(2, 8)
+}
+
 pub fn compute_threads() -> usize {
     topology().fast_cores.clamp(2, 16)
 }
@@ -47,21 +51,29 @@ pub fn urgent() {
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
-    throttle(false);
+    throttle(Some(false));
 }
 
 pub fn eco() {
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
     }
-    throttle(true);
+    throttle(Some(true));
 }
 
-fn throttle(on: bool) {
+pub fn normal() {
+    unsafe {
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
+    }
+    throttle(None);
+}
+
+fn throttle(on: Option<bool>) {
     let state = THREAD_POWER_THROTTLING_STATE {
         Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
-        ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
-        StateMask: if on { THREAD_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+        ControlMask: if on.is_some() { THREAD_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
+        StateMask: if on == Some(true) { THREAD_POWER_THROTTLING_EXECUTION_SPEED } else { 0 },
     };
     unsafe {
         let _ = SetThreadInformation(GetCurrentThread(), ThreadPowerThrottling, &state as *const _ as *const _, std::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32);

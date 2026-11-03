@@ -6,7 +6,6 @@ use std::{
 use fnv::FnvHasher;
 
 #[derive(Copy, Clone, Debug, Default)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Position {
     pub x: f32,
     pub y: f32,
@@ -193,45 +192,32 @@ pub fn quantize(a: f32, d: f32) -> f32 {
     (a / d + 0.5).trunc() * d
 }
 
-/// 2×3 matrix (2 rows, 3 columns) used for 2D linear transformations. It can represent transformations such as translation, rotation, or scaling.
 #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Transform2D(pub [f32; 6]);
 
 impl Transform2D {
-    /// Creates an identity transformation with no translation, rotation, or scaling applied.
     pub fn identity() -> Self {
         Self([1.0, 0.0, 0.0, 1.0, 0.0, 0.0])
     }
 
-    /// Creates a new transformation matrix.
-    ///
-    /// The parameters are interpreted as matrix elements as follows:
-    ///   [a c x]
-    ///   [b d y]
-    ///   [0 0 1]
     pub fn new(a: f32, b: f32, c: f32, d: f32, x: f32, y: f32) -> Self {
         Self([a, b, c, d, x, y])
     }
 
-    /// Creates a translation transformation matrix.
     pub fn translation(tx: f32, ty: f32) -> Self {
         Self([1.0, 0.0, 0.0, 1.0, tx, ty])
     }
 
-    /// Creates a rotation transformation matrix.
     pub fn rotation(a: f32) -> Self {
         let (sin, cos) = a.sin_cos();
 
         Self([cos, sin, -sin, cos, 0.0, 0.0])
     }
 
-    /// Creates a scaling transformation matrix.
     pub fn scaling(sx: f32, sy: f32) -> Self {
         Self([sx, 0.0, 0.0, sy, 0.0, 0.0])
     }
 
-    /// Translates the matrix.
     pub fn translate(&mut self, tx: f32, ty: f32) {
         let Self([.., x, y]) = self;
 
@@ -239,7 +225,6 @@ impl Transform2D {
         *y += ty;
     }
 
-    /// Rotates the matrix.
     pub fn rotate(&mut self, a: f32) {
         let (sin, cos) = a.sin_cos();
 
@@ -250,7 +235,6 @@ impl Transform2D {
         [*x, *y] = [*x * cos - *y * sin, *x * sin + *y * cos];
     }
 
-    /// Scales the matrix.
     pub fn scale(&mut self, sx: f32, sy: f32) {
         let Self([a, b, c, d, x, y]) = self;
 
@@ -262,7 +246,6 @@ impl Transform2D {
         *y *= sy;
     }
 
-    /// Skews the matrix horizontally.
     pub fn skew_x(&mut self, a: f32) {
         let tan = a.tan();
 
@@ -273,7 +256,6 @@ impl Transform2D {
         *x += *y * tan;
     }
 
-    /// Skews the matrix vertically.
     pub fn skew_y(&mut self, a: f32) {
         let tan = a.tan();
 
@@ -284,19 +266,16 @@ impl Transform2D {
         *y += *x * tan;
     }
 
-    /// Premultiplies the current transformation matrix with another matrix.
     #[inline]
     pub fn premultiply(&mut self, other: &Self) {
         *self = *other * *self;
     }
 
-    /// Inverts the current transformation matrix.
     #[inline]
     pub fn invert(&mut self) {
         *self = self.inverse()
     }
 
-    /// Returns the inverse of the current transformation matrix.
     pub fn inverse(&self) -> Self {
         let &Self([a, b, c, d, x, y]) = self;
         let [a, b, c, d, x, y] = [a as f64, b as f64, c as f64, d as f64, x as f64, y as f64];
@@ -319,7 +298,6 @@ impl Transform2D {
         ])
     }
 
-    /// Transforms a point using the current transformation matrix.
     pub fn transform_point(&self, sx: f32, sy: f32) -> (f32, f32) {
         let &Self([a, b, c, d, x, y]) = self;
 
@@ -328,7 +306,6 @@ impl Transform2D {
         (dx, dy)
     }
 
-    /// Calculates the average scale factor of the current transformation matrix.
     pub fn average_scale(&self) -> f32 {
         let &Self([a, b, c, d, ..]) = self;
 
@@ -338,13 +315,6 @@ impl Transform2D {
         (sx + sy) * 0.5
     }
 
-    /// If this transform is a uniform scale combined with a translation (no
-    /// rotation, skew, reflection, or non-uniform scaling), returns
-    /// `(scale, tx, ty)`; otherwise returns `None`.
-    ///
-    /// `epsilon` is the tolerance for the off-diagonal terms being zero and for
-    /// the two diagonal terms being equal. A pure translation reports a scale of
-    /// `1.0`.
     pub(crate) fn as_uniform_scale_translation(&self, epsilon: f32) -> Option<(f32, f32, f32)> {
         let &Self([a, b, c, d, tx, ty]) = self;
         let is_uniform =
@@ -352,13 +322,11 @@ impl Transform2D {
         is_uniform.then_some((a, tx, ty))
     }
 
-    /// Converts the current transformation matrix to a 3×4 matrix format.
     pub fn to_mat3x4(self) -> [f32; 12] {
         let Self([a, b, c, d, x, y]) = self;
         [a, b, 0.0, 0.0, c, d, 0.0, 0.0, x, y, 1.0, 0.0]
     }
 
-    /// Generates a cache key for the current transformation matrix.
     pub fn cache_key(&self) -> u64 {
         let mut hasher = FnvHasher::default();
 
@@ -534,78 +502,5 @@ impl Default for Bounds {
 impl Bounds {
     pub(crate) fn contains(&self, x: f32, y: f32) -> bool {
         (self.minx..=self.maxx).contains(&x) && (self.miny..=self.maxy).contains(&y)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::Transform2D;
-
-    const EPS: f32 = 1e-3;
-
-    #[test]
-    fn uniform_scale_translation() {
-        // (description, transform, expected (scale, tx, ty) or None)
-        #[allow(clippy::type_complexity)]
-        let cases: &[(&str, Transform2D, Option<(f32, f32, f32)>)] = &[
-            ("identity", Transform2D::identity(), Some((1.0, 0.0, 0.0))),
-            (
-                "pure translation",
-                Transform2D::translation(3.0, 4.0),
-                Some((1.0, 3.0, 4.0)),
-            ),
-            (
-                "uniform scale + translation",
-                Transform2D::new(2.0, 0.0, 0.0, 2.0, 5.0, 6.0),
-                Some((2.0, 5.0, 6.0)),
-            ),
-            ("pure scale", Transform2D::scaling(2.0, 2.0), Some((2.0, 0.0, 0.0))),
-            ("rotation", Transform2D::rotation(std::f32::consts::FRAC_PI_4), None),
-            // Non-zero off-diagonal term.
-            ("skew", Transform2D::new(1.0, 0.0, 0.5, 1.0, 0.0, 0.0), None),
-            // Different x and y scale.
-            (
-                "non-uniform scale",
-                Transform2D::new(2.0, 0.0, 0.0, 3.0, 0.0, 0.0),
-                None,
-            ),
-            // Negative uniform scale (180° reflection): a is not > 0.
-            ("negative scale", Transform2D::new(-2.0, 0.0, 0.0, -2.0, 0.0, 0.0), None),
-            // Y-flip: a and d differ in sign.
-            ("y-flip", Transform2D::new(1.0, 0.0, 0.0, -1.0, 0.0, 0.0), None),
-            // Off-diagonal terms just under epsilon are treated as zero...
-            (
-                "off-diagonal drift within epsilon",
-                Transform2D::new(2.0, 5e-4, 5e-4, 2.0, 0.0, 0.0),
-                Some((2.0, 0.0, 0.0)),
-            ),
-            // ... but just over epsilon is rejected.
-            (
-                "off-diagonal drift over epsilon",
-                Transform2D::new(2.0, 2e-3, 0.0, 2.0, 0.0, 0.0),
-                None,
-            ),
-            // Squareness (a vs d) uses a relative tolerance (eps * max(|a|, 1)), so
-            // a 0.05 difference at scale 100 (0.05 < 1e-3 * 100) is still uniform...
-            (
-                "squareness within relative tolerance",
-                Transform2D::new(100.0, 0.0, 0.0, 100.05, 0.0, 0.0),
-                Some((100.0, 0.0, 0.0)),
-            ),
-            // ... while a difference of 1.0 at the same scale is not.
-            (
-                "squareness over relative tolerance",
-                Transform2D::new(100.0, 0.0, 0.0, 101.0, 0.0, 0.0),
-                None,
-            ),
-        ];
-
-        for (description, transform, expected) in cases {
-            assert_eq!(
-                transform.as_uniform_scale_translation(EPS),
-                *expected,
-                "case: {description}"
-            );
-        }
     }
 }

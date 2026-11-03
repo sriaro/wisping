@@ -2,8 +2,9 @@ use std::cell::RefCell;
 
 use slint::ComponentHandle;
 
-use crate::app::{confirm, show_error, toast, Ctx};
+use crate::app::{confirm, error_text, show_error, toast, Ctx};
 use crate::engine::data;
+use crate::engine::fsx;
 use crate::engine::programs::{self, Program};
 use crate::i18n;
 use crate::{MainWindow, ProgItem, UninstallState};
@@ -50,7 +51,7 @@ fn push(ui: &MainWindow) {
                 size: if p.size > 0 { data::format_size(p.size) } else { String::new() }.into(),
                 date: p.date.as_str().into(),
                 tint: tint_of(&p.name),
-                can_open: !p.location.is_empty() && std::path::Path::new(&p.location).is_dir(),
+                can_open: !p.location.is_empty() && fsx::plain_dir(std::path::Path::new(&p.location)) == Some(true),
             })
             .collect();
         let st = ui.global::<UninstallState>();
@@ -71,7 +72,7 @@ fn load(c: &Ctx) {
     }
     st.set_loading(true);
     let weak = c.weak.clone();
-    std::thread::spawn(move || {
+    crate::engine::pool::spawn(move || {
         let _reset = crate::app::panic_reset(&weak, |ui| ui.global::<UninstallState>().set_loading(false));
         let list = programs::list();
         let _ = weak.upgrade_in_event_loop(move |ui| {
@@ -125,7 +126,7 @@ pub fn install(c: &Ctx) {
     st.on_open_folder(|idx| {
         if let Some(p) = program_at(idx) {
             let b = p.location.as_bytes();
-            if b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' &&std::path::Path::new(&p.location).is_dir() {
+            if b.len() > 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\' && fsx::plain_dir(std::path::Path::new(&p.location)) == Some(true) {
                 let _ = crate::engine::sys::launch("explorer.exe", &crate::engine::sys::quoted(std::path::Path::new(&p.location)));
             }
         }
@@ -151,20 +152,11 @@ pub fn install(c: &Ctx) {
                         toast(&c2, i18n::get("uninst.started"));
                     }
                     Err(e) if e.to_string() == programs::ELEVATED_USER_ENTRY => show_error(&c2, i18n::fmt("uninst.elevated", &[&crate::views::ltr(&p.name)])),
-                    Err(e) => show_error(&c2, e.to_string()),
+                    Err(e) => show_error(&c2, error_text(&e)),
                 }),
             );
         }
     });
-}
-
-pub fn preview(ui: &MainWindow) {
-    STATE.with(|s| {
-        let mut s = s.borrow_mut();
-        s.all = programs::list();
-        s.loaded = true;
-    });
-    push(ui);
 }
 
 pub fn refresh(ui: &MainWindow) {

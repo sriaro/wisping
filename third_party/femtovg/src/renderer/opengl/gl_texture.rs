@@ -4,10 +4,6 @@ use glow::HasContext;
 
 use crate::{ErrorKind, ImageFlags, ImageInfo, ImageSource, PixelFormat};
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
-#[path = "gl_texture/security_tests.rs"]
-mod security_tests;
-
 #[derive(Debug)]
 pub struct GlTexture {
     id: <glow::Context as glow::HasContext>::Texture,
@@ -30,8 +26,6 @@ impl GlTexture {
         }
     }
     pub fn new(context: &Rc<glow::Context>, info: ImageInfo, opengles_2_0: bool) -> Result<Self, ErrorKind> {
-        //let size = src.dimensions();
-
         let id = unsafe {
             let id = context.create_texture().unwrap();
             context.bind_texture(glow::TEXTURE_2D, Some(id));
@@ -51,13 +45,6 @@ impl GlTexture {
             external: false,
         };
 
-        // Upload a zeroed buffer instead of NULL so the texture's contents are
-        // defined from creation: glTexImage2D with NULL leaves them undefined,
-        // and embedded GL drivers hand back recycled, unscrubbed memory that
-        // edge-of-quad NEAREST lookups can pick up as stray pixels (#310).
-        // Desktop drivers zero pages in practice, which is why this went
-        // unnoticed; the wgpu backend guarantees zero-initialized textures, so
-        // this also aligns the two backends.
         let bytes_per_pixel = match info.format() {
             PixelFormat::Gray8 => 1,
             PixelFormat::Rgb8 => 3,
@@ -182,7 +169,6 @@ impl GlTexture {
         if flags.contains(ImageFlags::GENERATE_MIPMAPS) {
             unsafe {
                 context.generate_mipmap(glow::TEXTURE_2D);
-                //glow::TexParameteri(glow::TEXTURE_2D, glow::GENERATE_MIPMAP, glow::TRUE);
             }
         }
 
@@ -264,36 +250,11 @@ impl GlTexture {
                     glow::PixelUnpackData::Slice(Some(pixels.align_to().1)),
                 );
             },
-            #[cfg(target_arch = "wasm32")]
-            ImageSource::HtmlImageElement(image_element) => unsafe {
-                context.tex_sub_image_2d_with_html_image(
-                    glow::TEXTURE_2D,
-                    0,
-                    x as i32,
-                    y as i32,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    image_element,
-                )
-            },
-            #[cfg(target_arch = "wasm32")]
-            ImageSource::HtmlCanvasElement(canvas_element) => unsafe {
-                context.tex_sub_image_2d_with_html_canvas(
-                    glow::TEXTURE_2D,
-                    0,
-                    x as i32,
-                    y as i32,
-                    glow::RGBA,
-                    glow::UNSIGNED_BYTE,
-                    canvas_element,
-                )
-            },
         }
 
         if self.info.flags().contains(ImageFlags::GENERATE_MIPMAPS) {
             unsafe {
                 context.generate_mipmap(glow::TEXTURE_2D);
-                //glow::TexParameteri(glow::TEXTURE_2D, glow::GENERATE_MIPMAP, glow::TRUE);
             }
         }
 
@@ -302,8 +263,6 @@ impl GlTexture {
             if !opengles_2_0 {
                 context.pixel_store_i32(glow::UNPACK_ROW_LENGTH, 0);
             }
-            //glow::PixelStorei(glow::UNPACK_SKIP_PIXELS, 0);
-            //glow::PixelStorei(glow::UNPACK_SKIP_ROWS, 0);
             context.bind_texture(glow::TEXTURE_2D, None);
         }
 

@@ -1,7 +1,8 @@
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -9,19 +10,16 @@ use windows::Win32::System::Registry::{HKEY, REG_VALUE_TYPE, RegSetValueExW};
 use windows::core::PCWSTR;
 use winreg::RegKey;
 use winreg::enums::{KEY_WRITE, KEY_WOW64_64KEY};
-#[cfg(test)]
-use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
 use super::data;
 use super::fsx;
+use super::regbackup::Hive;
+use super::regbackup::integrity;
 use super::registry;
 use super::tasks::decode;
 
 const HEADER: &str = "Windows Registry Editor Version 5.00";
 
-#[cfg(test)]
-#[path = "backups/security_tests.rs"]
-mod security_tests;
 #[path = "backups/registry_target.rs"]
 mod registry_target;
 pub(super) const MAX_FILE: u64 = 16 * 1024 * 1024;
@@ -62,8 +60,7 @@ const OWN_KEYS: [&str; 26] = [
 
 fn own_key(key: &str) -> bool {
     let k = key.to_lowercase();
-    let test = registry::allow_test_key().then(|| format!("HKEY_CURRENT_USER\\{}", registry::TEST_KEY));
-    OWN_KEYS.iter().copied().chain(test.as_deref()).map(str::to_lowercase).any(|p| {
+    OWN_KEYS.iter().copied().map(str::to_lowercase).any(|p| {
         let child_only = CHILD_ONLY.iter().any(|c| c.eq_ignore_ascii_case(&p));
         (k == p && !child_only) || fsx::key_within(&k, &p)
     })
@@ -116,7 +113,10 @@ fn open_backup(file: &Path) -> Result<fs::File, &'static str> {
 }
 
 fn read_backup(file: &Path) -> Result<Vec<u8>, &'static str> {
-    let file = open_backup(file)?;
+    read_held(&mut open_backup(file)?)
+}
+
+fn read_held(file: &mut fs::File) -> Result<Vec<u8>, &'static str> {
     let mut bytes = Vec::new();
     file.take(MAX_FILE + 1).read_to_end(&mut bytes).map_err(|_| "could not be read")?;
     if bytes.len() as u64 > MAX_FILE {
@@ -175,10 +175,6 @@ fn checked_text(bytes: &[u8]) -> Result<String, &'static str> {
         return Err("has no registry keys");
     }
     Ok(text.to_string())
-}
-
-pub fn check_file(file: &Path) -> Result<(), &'static str> {
-    read_backup(file).and_then(|bytes| checked_text(&bytes)).and_then(|text| parse_import(&text)).map(|_| ())
 }
 
 struct SavedValue {
@@ -295,24 +291,86 @@ pub struct Backup {
     pub when: String,
     pub files: usize,
     pub keys: Vec<String>,
+    pub restorable: bool,
+}
+
+pub struct DeleteReport {
+    pub removed: usize,
+    pub failed: usize,
+    pub needs_admin: bool,
 }
 
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 32 && id.bytes().all(|b| b.is_ascii_digit() || b == b'-')
 }
 
-fn reg_files(dir: &Path) -> Vec<PathBuf> {
+enum Saved {
+    Registry,
+    Task,
+    Startup(Hive, OsString),
+}
+
+fn saved_kind(file: &Path) -> Option<Saved> {
+    let name = file.file_name()?.to_str()?;
+    let lower = name.to_ascii_lowercase();
+    for (prefix, hive) in [("startup-user-", Hive::User), ("startup-common-", Hive::Machine)] {
+        if lower.starts_with(prefix) {
+            return Some(Saved::Startup(hive, OsString::from(&name[prefix.len()..])));
+        }
+    }
+    if lower.ends_with(".reg") {
+        Some(Saved::Registry)
+    } else if lower.starts_with("task-") && lower.ends_with(".xml") {
+        Some(Saved::Task)
+    } else {
+        None
+    }
+}
+
+fn is_reg(file: &Path) -> bool {
+    matches!(saved_kind(file), Some(Saved::Registry))
+}
+
+fn sealable(file: &Path) -> bool {
+    match saved_kind(file) {
+        Some(Saved::Registry) => true,
+        Some(_) => fs::symlink_metadata(file).is_ok_and(|m| m.is_file() && !fsx::attrs_reparse(m.file_attributes()) && m.len() <= MAX_FILE),
+        None => false,
+    }
+}
+
+fn is_sealed(file: &Path) -> bool {
+    read_backup(file).is_ok_and(|bytes| integrity::verify(file, &bytes).unwrap_or(false))
+}
+
+fn can_restore(file: &Path, elevated: bool, receipts: bool) -> bool {
+    match saved_kind(file) {
+        Some(Saved::Registry) => true,
+        Some(Saved::Startup(Hive::User, _)) if !elevated => true,
+        Some(_) => receipts && is_sealed(file),
+        None => false,
+    }
+}
+
+fn backup_files(dir: &Path) -> Vec<PathBuf> {
     let mut files: Vec<PathBuf> = fs::read_dir(dir)
         .map(|rd| {
             rd.flatten()
                 .filter(|e| e.metadata().is_ok_and(|m| plain_file(&m)))
                 .map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("reg")))
                 .collect()
         })
         .unwrap_or_default();
     files.sort();
     files
+}
+
+fn reg_files(dir: &Path) -> Vec<PathBuf> {
+    backup_files(dir).into_iter().filter(|p| is_reg(p)).collect()
+}
+
+fn label_of(file: &Path) -> Option<String> {
+    if is_reg(file) { key_of(file) } else { file.file_name().map(|n| n.to_string_lossy().into_owned()) }
 }
 
 fn key_of(file: &Path) -> Option<String> {
@@ -343,25 +401,31 @@ pub fn list() -> Vec<Backup> {
     list_in(&data::backup_root())
 }
 
-fn ids_in(root: &Path) -> Vec<(String, Vec<PathBuf>)> {
-    if fsx::is_reparse(root) {
+fn dirs_in(root: &Path) -> Vec<String> {
+    if fsx::plain_dir(root) != Some(true) {
         return Vec::new();
     }
     let Ok(rd) = fs::read_dir(root) else { return Vec::new() };
-    let mut out: Vec<(String, Vec<PathBuf>)> = rd
+    let mut out: Vec<String> = rd
         .flatten()
         .filter(|e| e.metadata().is_ok_and(|m| m.is_dir() && !fsx::attrs_reparse(m.file_attributes())))
         .filter_map(|e| {
             let id = e.file_name().to_string_lossy().to_string();
-            if !valid_id(&id) {
-                return None;
-            }
-            let files = reg_files(&e.path());
-            (!files.is_empty()).then_some((id, files))
+            valid_id(&id).then_some(id)
         })
         .collect();
-    out.sort_by(|a, b| b.0.cmp(&a.0));
+    out.sort_by(|a, b| b.cmp(a));
     out
+}
+
+fn ids_in(root: &Path) -> Vec<(String, Vec<PathBuf>)> {
+    dirs_in(root)
+        .into_iter()
+        .filter_map(|id| {
+            let files = backup_files(&root.join(&id));
+            (!files.is_empty()).then_some((id, files))
+        })
+        .collect()
 }
 
 pub fn count() -> usize {
@@ -369,37 +433,46 @@ pub fn count() -> usize {
 }
 
 pub fn list_in(root: &Path) -> Vec<Backup> {
+    let elevated = super::sys::elevation().unwrap_or(true);
+    let receipts = integrity::has_records().unwrap_or(false);
     ids_in(root)
         .into_iter()
         .map(|(id, files)| {
-            let keys = files.iter().take(3).filter_map(|f| key_of(f)).collect();
-            Backup { when: pretty_when(&id), id, files: files.len(), keys }
+            let keys = files.iter().take(3).filter_map(|f| label_of(f)).collect();
+            let restorable = files.iter().any(|f| can_restore(f, elevated, receipts));
+            Backup { when: pretty_when(&id), restorable, id, files: files.len(), keys }
         })
         .collect()
 }
 
 pub fn restore(id: &str) -> io::Result<usize> {
-    restore_with(&data::backup_root(), id, super::sys::elevation()?, super::regbackup::integrity::verify)
-}
-
-fn restore_with(root: &Path, id: &str, elevated: bool, trusted: impl Fn(&Path, &[u8]) -> io::Result<bool>) -> io::Result<usize> {
+    let root = data::backup_root();
+    let elevated = super::sys::elevation()?;
     if !valid_id(id) {
         return Err(io::Error::other("refused"));
     }
     let dir = root.join(id);
-    if !dir.is_dir() || fsx::is_reparse(&dir) || fsx::is_reparse(root) {
-        return Err(io::Error::other("This backup no longer exists."));
+    if fsx::plain_dir(&dir) != Some(true) {
+        return Err(io::Error::other("gone"));
     }
     let files = reg_files(&dir);
     if files.is_empty() {
-        return Err(io::Error::other("This backup has no registry files."));
+        return restore_copies(&dir, id, elevated);
     }
     let mut imports = Vec::new();
+    let mut total = 0u64;
     for f in &files {
-        let checked = read_backup(f).and_then(|bytes| {
-            let keys = checked_text(&bytes).and_then(|text| parse_import(&text))?;
-            if (elevated || keys.iter().any(|key| key.machine)) && !trusted(f, &bytes).unwrap_or(false) {
-                return Err("has changed or has no trusted integrity record; privileged restore requires a backup created by Wisping as administrator");
+        let bytes = match read_backup(f) {
+            Ok(bytes) => bytes,
+            Err(why) => return Err(refusal(why)),
+        };
+        total = total.saturating_add(bytes.len() as u64);
+        if total > MAX_RESTORE {
+            return Err(io::Error::other("toobig"));
+        }
+        let checked = checked_text(&bytes).and_then(|text| parse_import(&text)).and_then(|keys| {
+            if (elevated || keys.iter().any(|key| key.machine)) && !integrity::verify(f, &bytes).unwrap_or(false) {
+                return Err(UNSEALED);
             }
             Ok(keys)
         });
@@ -408,27 +481,94 @@ fn restore_with(root: &Path, id: &str, elevated: bool, trusted: impl Fn(&Path, &
             Err(why) => {
                 let name = f.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
                 data::log(&format!("restore {} refused: {} {}", id, name, why));
-                return Err(io::Error::other(format!("This backup was not restored: {} {}.", name, why)));
+                return Err(refusal(why));
             }
         }
     }
     let mut restored = 0;
-    let mut failed: Option<String> = None;
+    let mut failed: Option<io::Error> = None;
     for keys in &imports {
         match import_keys(keys) {
             Ok(()) => restored += 1,
             Err(e) => {
                 if failed.is_none() {
-                    failed = Some(e.to_string());
+                    failed = Some(e);
                 }
             }
         }
     }
     data::log(&format!("restore {} {} of {}", id, restored, files.len()));
     match failed {
-        Some(msg) => Err(io::Error::other(if msg.is_empty() { "Windows refused part of this backup. Some entries need administrator rights.".to_string() } else { msg })),
+        Some(e) => Err(e),
         None => Ok(restored),
     }
+}
+
+const UNSEALED: &str = "has changed or has no trusted integrity record; privileged restore requires a backup created by Wisping as administrator";
+const NO_TASK: &str = "does not name a scheduled task Wisping can restore";
+const MAX_RESTORE: u64 = 128 * 1024 * 1024;
+
+fn refusal(why: &str) -> io::Error {
+    io::Error::other(match why {
+        UNSEALED => "unsealed",
+        NO_TASK => "notask",
+        "could not be read" | "could not be read safely" => "unreadable",
+        _ => "damaged",
+    })
+}
+
+fn restore_copies(dir: &Path, id: &str, elevated: bool) -> io::Result<usize> {
+    let copies: Vec<(OsString, Saved)> = backup_files(dir)
+        .into_iter()
+        .filter_map(|f| Some((f.file_name()?.to_os_string(), saved_kind(&f)?)))
+        .collect();
+    if copies.is_empty() {
+        return Err(io::Error::other("norestore"));
+    }
+    let pinned = fsx::PinnedDir::open(dir)?;
+    let total = copies.len();
+    let mut restored = 0;
+    for (name, kind) in copies {
+        let label = name.to_string_lossy().into_owned();
+        let refuse = |why: &str| {
+            data::log(&format!("restore {} refused: {} {}", id, label, why));
+            refusal(why)
+        };
+        if !elevated && !matches!(kind, Saved::Startup(Hive::User, _)) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "needs administrator rights"));
+        }
+        let file = pinned.path().join(&name);
+        let mut held = pinned.read_file(&name).map_err(|_| refuse("could not be read safely"))?;
+        let bytes = if elevated {
+            let bytes = read_held(&mut held).map_err(refuse)?;
+            if !integrity::verify(&file, &bytes).unwrap_or(false) {
+                return Err(refuse(UNSEALED));
+            }
+            held.seek(SeekFrom::Start(0))?;
+            Some(bytes)
+        } else {
+            None
+        };
+        match kind {
+            Saved::Task => {
+                let task = bytes.as_deref().and_then(|b| super::tasks::task_path(&decode(b))).ok_or_else(|| refuse(NO_TASK))?;
+                super::tasks::restore(&file, &task)?;
+            }
+            Saved::Startup(hive, leaf) => {
+                let folder = super::startup::folder_of(hive)
+                    .filter(|f| fsx::local_drive_path(&f.to_string_lossy()))
+                    .ok_or_else(|| io::Error::other("nofolder"))?;
+                fsx::PinnedDir::open(&folder)?.restore_file(&leaf, &mut held).map_err(|e| {
+                    if e.kind() == io::ErrorKind::AlreadyExists { io::Error::new(io::ErrorKind::AlreadyExists, "exists") } else { e }
+                })?;
+                super::startup::invalidate_cache();
+            }
+            Saved::Registry => continue,
+        }
+        restored += 1;
+    }
+    data::log(&format!("restore {} {} of {}", id, restored, total));
+    Ok(restored)
 }
 
 fn remove_one(dir: fsx::PinnedDir) -> io::Result<()> {
@@ -448,34 +588,44 @@ pub fn delete(id: &str) -> io::Result<()> {
     let root = fsx::PinnedDir::open(&data::backup_root())?;
     let dir = root.deletable_child(id.as_ref())?;
     let admin = super::sys::is_admin();
-    let mut receipts: Vec<(PathBuf, Vec<u8>)> = Vec::new();
-    if admin || super::regbackup::integrity::has_records()? {
-        for file in reg_files(dir.path()) {
-            let bytes = read_backup(&file).map_err(|why| io::Error::other(format!("Wisping cannot verify this backup: {why}.")))?;
-            if !admin && super::regbackup::integrity::verify(&file, &bytes)? {
-                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "This backup was created by Wisping as administrator. Restart Wisping as administrator to delete it."));
+    let mut receipts: Vec<String> = Vec::new();
+    if admin {
+        for file in backup_files(dir.path()).into_iter().filter(|f| sealable(f)) {
+            if let Ok(bytes) = read_backup(&file)
+                && let Ok(receipt) = integrity::receipt(&file, &bytes) {
+                    receipts.push(receipt);
             }
-            receipts.push((file, bytes));
+        }
+    } else if integrity::has_records()? {
+        for file in backup_files(dir.path()).into_iter().filter(|f| sealable(f)) {
+            let bytes = read_backup(&file).map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "needs administrator rights"))?;
+            if integrity::verify(&file, &bytes)? {
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "needs administrator rights"));
+            }
         }
     }
-    remove_one(dir).map_err(|_| io::Error::other("Wisping could not delete that backup."))?;
+    remove_one(dir).map_err(|_| io::Error::other("undeletable"))?;
     if admin {
-        for (file, bytes) in &receipts {
-            let _ = super::regbackup::integrity::forget(file, bytes);
+        for receipt in &receipts {
+            let _ = integrity::forget_name(receipt);
         }
     }
     data::log(&format!("backup deleted {}", id));
     Ok(())
 }
 
-pub fn delete_all() -> usize {
-    let mut removed = 0;
-    for (id, _) in ids_in(&data::backup_root()) {
-        if delete(&id).is_ok() {
-            removed += 1;
+pub fn delete_all() -> DeleteReport {
+    let mut report = DeleteReport { removed: 0, failed: 0, needs_admin: false };
+    for id in dirs_in(&data::backup_root()) {
+        match delete(&id) {
+            Ok(()) => report.removed += 1,
+            Err(e) => {
+                report.failed += 1;
+                report.needs_admin |= e.kind() == io::ErrorKind::PermissionDenied;
+            }
         }
     }
-    removed
+    report
 }
 
 pub fn prune(keep: usize) -> usize {
@@ -491,7 +641,6 @@ pub fn prune(keep: usize) -> usize {
 
 fn sweep_receipts() {
     use std::sync::atomic::{AtomicBool, Ordering};
-    use super::regbackup::integrity;
     static SWEPT: AtomicBool = AtomicBool::new(false);
     if !super::sys::is_admin() || SWEPT.swap(true, Ordering::SeqCst) {
         return;
@@ -502,7 +651,7 @@ fn sweep_receipts() {
     }
     let mut kept = HashSet::new();
     for (_, files) in ids_in(&data::backup_root()) {
-        for file in files {
+        for file in files.into_iter().filter(|f| sealable(f)) {
             let Ok(name) = read_backup(&file).map_err(io::Error::other).and_then(|bytes| integrity::receipt(&file, &bytes)) else { return };
             kept.insert(name.to_lowercase());
         }

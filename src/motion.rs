@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
 use slint::{ComponentHandle, Timer};
@@ -9,18 +9,26 @@ use crate::views::push_all;
 use crate::i18n;
 use crate::{AppState, MainWindow, T, Theme};
 
+const FADE_MS: u64 = 320;
+const LANG_OUT_MS: u64 = 260;
+const LANG_IN_MS: u64 = 500;
+const FRAME_WAIT_MS: u64 = 120;
+
 thread_local! {
     static FADE: Timer = Timer::default();
-    static LANG: Timer = Timer::default();
+    static LANG_OUT: Timer = Timer::default();
+    static LANG_IN: Timer = Timer::default();
+    static WAIT: Timer = Timer::default();
     static FADING: Cell<bool> = const { Cell::new(false) };
     static SWITCHING: Cell<bool> = const { Cell::new(false) };
+    static ARMED: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
 }
 
 thread_local! {
     static GEN: Cell<u32> = const { Cell::new(0) };
     static OUTGOING: Cell<bool> = const { Cell::new(false) };
     static WANT: Cell<i32> = const { Cell::new(0) };
-    static ENTERING: std::cell::RefCell<Option<(u32, Ctx)>> = const { std::cell::RefCell::new(None) };
+    static ENTERING: RefCell<Option<(u32, Ctx)>> = const { RefCell::new(None) };
 }
 
 pub fn sync_scale(ui: &MainWindow) {
@@ -28,10 +36,25 @@ pub fn sync_scale(ui: &MainWindow) {
 }
 
 pub fn after_frame() {
+    if ARMED.with(|a| a.borrow().is_some()) {
+        let _ = slint::invoke_from_event_loop(fire);
+    }
     if ENTERING.with(|e| e.borrow().is_none()) {
         return;
     }
     let _ = slint::invoke_from_event_loop(start_entering);
+}
+
+fn arm(f: impl FnOnce() + 'static) {
+    ARMED.with(|a| *a.borrow_mut() = Some(Box::new(f)));
+    WAIT.with(|t| t.start(slint::TimerMode::SingleShot, Duration::from_millis(FRAME_WAIT_MS), fire));
+}
+
+fn fire() {
+    WAIT.with(|t| t.stop());
+    if let Some(f) = ARMED.with(|a| a.borrow_mut().take()) {
+        f();
+    }
 }
 
 fn start_entering() {
@@ -101,38 +124,24 @@ fn sync_quiet(theme: &Theme) {
 fn end_fade(ui: &MainWindow) {
     FADE.with(|f| f.stop());
     let theme = ui.global::<Theme>();
-    theme.set_fade_opacity(0.0);
-    theme.set_fade_image(slint::Image::default());
+    theme.set_fade_ms(0.0);
     FADING.set(false);
     sync_quiet(&theme);
 }
 
 pub fn crossfade(ui: &MainWindow, change: impl FnOnce()) {
-    if FADING.get() {
-        end_fade(ui);
-    }
     let theme = ui.global::<Theme>();
-    let Ok(shot) = ui.window().take_snapshot() else {
-        change();
-        return;
-    };
-    theme.set_fade_image(slint::Image::from_rgba8(shot));
-    theme.set_fade_opacity(1.0);
+    theme.set_fade_ms(FADE_MS as f32);
     FADING.set(true);
     sync_quiet(&theme);
     change();
     let weak = ui.as_weak();
-    let start = std::time::Instant::now();
     FADE.with(|f| {
-        f.start(slint::TimerMode::Repeated, Duration::from_millis(8), move || {
-            let Some(ui) = weak.upgrade() else { return };
-            let k = (start.elapsed().as_secs_f32() / 0.32).min(1.0);
-            if k >= 1.0 {
+        f.start(slint::TimerMode::SingleShot, Duration::from_millis(FADE_MS + 40), move || {
+            if let Some(ui) = weak.upgrade() {
                 end_fade(&ui);
-            } else {
-                ui.global::<Theme>().set_fade_opacity((1.0 - k).powi(2));
             }
-        });
+        })
     });
 }
 
@@ -153,50 +162,38 @@ fn swap_language(c: &Ctx, now: bool) {
 }
 
 pub fn switch_language(c: &Ctx) {
-    const OUT: f32 = 0.26;
-    const IN: f32 = 0.50;
     let Some(ui) = c.weak.upgrade() else { return };
     if SWITCHING.get() {
         return;
     }
-    if FADING.get() {
-        end_fade(&ui);
-    }
     SWITCHING.set(true);
-    sync_quiet(&ui.global::<Theme>());
+    let theme = ui.global::<Theme>();
+    sync_quiet(&theme);
+    theme.set_content_ms(LANG_OUT_MS as f32);
+    theme.set_content_opacity(0.0);
     let now = !i18n::zh();
     let c = c.clone();
-    let start = std::time::Instant::now();
-    let resumed: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
-    LANG.with(|f| {
-        f.start(slint::TimerMode::Repeated, Duration::from_millis(8), move || {
-            let Some(ui) = c.weak.upgrade() else { return };
-            let theme = ui.global::<Theme>();
-            let ease = |k: f32| k * k * (3.0 - 2.0 * k);
-            match resumed.get() {
-                None => {
-                    let k = start.elapsed().as_secs_f32() / OUT;
-                    if k < 1.0 {
-                        theme.set_content_opacity(1.0 - ease(k));
-                    } else {
-                        theme.set_content_opacity(0.0);
-                        swap_language(&c, now);
-                        resumed.set(Some(std::time::Instant::now()));
-                    }
-                }
-                Some(at) => {
-                    let k = at.elapsed().as_secs_f32() / IN;
-                    if k < 1.0 {
-                        theme.set_content_opacity(ease(k));
-                    } else {
-                        theme.set_content_opacity(1.0);
-                        SWITCHING.set(false);
-                        sync_quiet(&theme);
-                        LANG.with(|f| f.stop());
-                    }
-                }
-            }
-        });
+    LANG_OUT.with(|f| {
+        f.start(slint::TimerMode::SingleShot, Duration::from_millis(LANG_OUT_MS + 20), move || {
+            swap_language(&c, now);
+            let c = c.clone();
+            arm(move || reveal_language(&c));
+        })
     });
 }
 
+fn reveal_language(c: &Ctx) {
+    let Some(ui) = c.weak.upgrade() else { return };
+    let theme = ui.global::<Theme>();
+    theme.set_content_ms(LANG_IN_MS as f32);
+    theme.set_content_opacity(1.0);
+    let weak = c.weak.clone();
+    LANG_IN.with(|f| {
+        f.start(slint::TimerMode::SingleShot, Duration::from_millis(LANG_IN_MS), move || {
+            SWITCHING.set(false);
+            if let Some(ui) = weak.upgrade() {
+                sync_quiet(&ui.global::<Theme>());
+            }
+        })
+    });
+}

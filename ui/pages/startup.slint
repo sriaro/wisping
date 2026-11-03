@@ -140,10 +140,11 @@ export component StartupPage inherits PageFrame {
         }
         Rectangle {
             vertical-stretch: 1;
-            if AppState.startups.length > 0: Rectangle {
-                for e in AppState.startups-epoch: vl := VirtualList {
-                    length: AppState.startups.length;
-                    row-height: 58px;
+            if AppState.startups.length > 0: vl := VirtualList {
+                reset: AppState.startups-epoch[0];
+                length: AppState.startups.length;
+                row-height: 58px;
+                for e in AppState.startups-epoch: Rectangle {
                     for k in vl.count: StartRow {
                         y: (vl.first + k) * 58px;
                         order: k;

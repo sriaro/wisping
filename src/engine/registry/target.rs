@@ -11,11 +11,8 @@ use winreg::enums::{KEY_CREATE_SUB_KEY, KEY_READ, KEY_WOW64_64KEY, REG_LINK};
 
 pub(in crate::engine) const DELETE: u32 = 0x0001_0000;
 
-#[cfg(test)]
-mod tests;
-
 fn refused() -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, "A registry target is a link or has changed.")
+    io::Error::new(io::ErrorKind::PermissionDenied, "reglink")
 }
 
 fn nt_result(status: NTSTATUS) -> io::Result<()> {

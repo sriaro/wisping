@@ -92,7 +92,6 @@ impl UniformArray {
     }
 
     pub fn set_conic_start_angle(&mut self, angle: f32) {
-        // frag[13].x in the fragment shader; frag[12].w holds the scissor radius.
         self.0[52] = angle;
     }
 }

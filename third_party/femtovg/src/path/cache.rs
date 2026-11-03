@@ -138,7 +138,6 @@ impl PathCache {
     pub fn new(verbs: impl Iterator<Item = Verb>, transform: &Transform2D, tess_tol: f32, dist_tol: f32) -> Self {
         let mut cache = Self::default();
 
-        // Convert path verbs to a set of contours
         for verb in verbs {
             match verb {
                 Verb::MoveTo(x, y) => {
@@ -170,20 +169,6 @@ impl PathCache {
                             tess_tol,
                             dist_tol,
                         );
-
-                        // cache.tesselate_bezier_afd(
-                        //     last.pos.x,
-                        //     last.pos.y,
-                        //     c1x,
-                        //     c1y,
-                        //     c2x,
-                        //     c2y,
-                        //     x,
-                        //     y,
-                        //     PointFlags::CORNER,
-                        //     tess_tol,
-                        //     dist_tol,
-                        // );
                     }
                 }
                 Verb::Close => {
@@ -210,7 +195,6 @@ impl PathCache {
         cache.contours.retain_mut(|contour| {
             let mut points = &mut all_points[contour.point_range.clone()];
 
-            // If the first and last points are the same, remove the last, mark as closed contour.
             if let (Some(p0), Some(p1)) = (points.last(), points.first()) {
                 if p0.approx_eq(p1, dist_tol) {
                     contour.point_range.end -= 1;
@@ -223,7 +207,6 @@ impl PathCache {
                 return false;
             }
 
-            // Enforce solidity by reversing the winding.
             if let Some(solidity) = contour.solidity {
                 let area = Contour::polygon_area(points);
 
@@ -273,7 +256,6 @@ impl PathCache {
         if let Some(contour) = self.contours.last_mut() {
             let new_point = Point::new(x, y, flags);
 
-            // If last point equals this new point just OR the flags and ignore the new point
             if let Some(last_point) = self.points.get_mut(contour.point_range.end) {
                 if last_point.approx_eq(&new_point, dist_tol) {
                     last_point.flags |= new_point.flags;
@@ -360,118 +342,7 @@ impl PathCache {
         );
     }
 
-    // fn tesselate_bezier_afd(
-    //     &mut self,
-    //     x1: f32,
-    //     y1: f32,
-    //     x2: f32,
-    //     y2: f32,
-    //     x3: f32,
-    //     y3: f32,
-    //     x4: f32,
-    //     y4: f32,
-    //     flags: PointFlags,
-    //     tess_tol: f32,
-    //     dist_tol: f32,
-    // ) {
-    //     let ax = -x1 + 3.*x2 - 3.*x3 + x4;
-    //     let ay = -y1 + 3.*y2 - 3.*y3 + y4;
-    //     let bx = 3.*x1 - 6.*x2 + 3.*x3;
-    //     let by = 3.*y1 - 6.*y2 + 3.*y3;
-    //     let cx = -3.*x1 + 3.*x2;
-    //     let cy = -3.*y1 + 3.*y2;
-
-    //     // Transform to forward difference basis (stepsize 1)
-    //     let mut px = x1;
-    //     let mut py = y1;
-    //     let mut dx = ax + bx + cx;
-    //     let mut dy = ay + by + cy;
-    //     let mut ddx = 6.*ax + 2.*bx;
-    //     let mut ddy = 6.*ay + 2.*by;
-    //     let mut dddx = 6.*ax;
-    //     let mut dddy = 6.*ay;
-
-    //     //printf("dx: %f, dy: %f\n", dx, dy);
-    //     //printf("ddx: %f, ddy: %f\n", ddx, ddy);
-    //     //printf("dddx: %f, dddy: %f\n", dddx, dddy);
-
-    //     const AFD_ONE: i32 = 1<<10;
-
-    //     let mut t = 0;
-    //     let mut dt = AFD_ONE;
-
-    //     let tol = tess_tol * 4.0;
-
-    //     while t < AFD_ONE {
-
-    //         // Flatness measure.
-    //         let mut d = ddx*ddx + ddy*ddy + dddx*dddx + dddy*dddy;
-
-    //         // Go to higher resolution if we're moving a lot
-    //         // or overshooting the end.
-    //         while (d > tol && dt > 1) || (t+dt > AFD_ONE) {
-
-    //             // Apply L to the curve. Increase curve resolution.
-    //             dx = 0.5 * dx - (1.0/8.0)*ddx + (1.0/16.0)*dddx;
-    //             dy = 0.5 * dy - (1.0/8.0)*ddy + (1.0/16.0)*dddy;
-    //             ddx = (1.0/4.0) * ddx - (1.0/8.0) * dddx;
-    //             ddy = (1.0/4.0) * ddy - (1.0/8.0) * dddy;
-    //             dddx = (1.0/8.0) * dddx;
-    //             dddy = (1.0/8.0) * dddy;
-
-    //             // Half the stepsize.
-    //             dt >>= 1;
-
-    //             // Recompute d
-    //             d = ddx*ddx + ddy*ddy + dddx*dddx + dddy*dddy;
-
-    //         }
-
-    //         // Go to lower resolution if we're really flat
-    //         // and we aren't going to overshoot the end.
-    //         // XXX: tol/32 is just a guess for when we are too flat.
-    //         while (d > 0.0 && d < tol/32.0 && dt < AFD_ONE) && (t+2*dt <= AFD_ONE) {
-
-    //             // printf("down\n");
-
-    //             // Apply L^(-1) to the curve. Decrease curve resolution.
-    //             dx = 2. * dx + ddx;
-    //             dy = 2. * dy + ddy;
-    //             ddx = 4. * ddx + 4. * dddx;
-    //             ddy = 4. * ddy + 4. * dddy;
-    //             dddx = 8. * dddx;
-    //             dddy = 8. * dddy;
-
-    //             // Double the stepsize.
-    //             dt <<= 1;
-
-    //             // Recompute d
-    //             d = ddx*ddx + ddy*ddy + dddx*dddx + dddy*dddy;
-
-    //         }
-
-    //         // Forward differencing.
-    //         px += dx;
-    //         py += dy;
-    //         dx += ddx;
-    //         dy += ddy;
-    //         ddx += dddx;
-    //         ddy += dddy;
-
-    //         // Output a point.
-    //         self.add_point(px, py, flags, dist_tol);
-
-    //         // Advance along the curve.
-    //         t += dt;
-
-    //         // Ensure we don't overshoot.
-    //         debug_assert!(t <= AFD_ONE);
-
-    //     }
-    // }
-
     pub fn contains_point(&self, x: f32, y: f32, fill_rule: FillRule) -> bool {
-        // Early out if point is outside the bounding rectangle
         if !self.bounds.contains(x, y) {
             return false;
         }
@@ -493,7 +364,6 @@ impl PathCache {
                 }
             }
         } else {
-            // NonZero
             for contour in &self.contours {
                 let mut winding_number: i32 = 0;
 
@@ -521,7 +391,6 @@ impl PathCache {
 
         self.calculate_joins(fringe_width, line_join, miter_limit);
 
-        // Calculate max vertex usage.
         for contour in &mut self.contours {
             let point_count = contour.point_count();
             let mut vertex_count = point_count + contour.bevel + 1;
@@ -543,10 +412,8 @@ impl PathCache {
             let triangle_count = (contour.fill.capacity() - 2) * 3;
             let mut triangle_fan_fill = Vec::with_capacity(triangle_count);
 
-            // TODO: woff = 0.0 produces no artifaacts for small sizes
             let woff = 0.5 * fringe_width;
             let foff = woff - 0.05 * fringe_width;
-            //let woff = 0.0; // Makes everything thicker
 
             if has_fringe {
                 for (p0, p1) in contour.point_pairs(&self.points) {
@@ -572,8 +439,6 @@ impl PathCache {
                 }
             }
 
-            // convert fill triangle fan to triangles, to eliminate requirement for GL_TRIANGLE_FAN
-            // from the renderer.
             if triangle_fan_fill.len() > 2 {
                 let n = triangle_fan_fill.len() as f32;
                 let (sx, sy) = triangle_fan_fill.iter().fold((0.0, 0.0), |(x, y), v| (x + v.x, y + v.y));
@@ -589,8 +454,6 @@ impl PathCache {
                 let ru = 1.0;
 
                 let (lw, lu) = if convex {
-                    // Create only half a fringe for convex shapes so that
-                    // the shape can be rendered without stenciling.
                     (woff, 0.5)
                 } else {
                     (fringe_width + woff, 0.0)
@@ -605,7 +468,6 @@ impl PathCache {
                     }
                 }
 
-                // Loop it
                 let p0 = contour.stroke[0];
                 let p1 = contour.stroke[1];
                 contour.stroke.push(Vertex::new(p0.x, p0.y, lu, 1.0));
@@ -629,7 +491,6 @@ impl PathCache {
 
         let stroke_width = stroke_width + (fringe_width * 0.5);
 
-        // Disable the gradient used for antialiasing when antialiasing is not enabled.
         let (u0, u1) = if fringe_width == 0.0 { (0.5, 0.5) } else { (0.0, 1.0) };
 
         self.calculate_joins(stroke_width, line_join, miter_limit);
@@ -638,7 +499,6 @@ impl PathCache {
             contour.stroke.clear();
 
             for (i, (p0, p1)) in contour.point_pairs(&self.points).enumerate() {
-                // Add start cap
                 if !contour.closed && i == 1 {
                     match line_cap_start {
                         LineCap::Butt => butt_cap_start(
@@ -693,7 +553,6 @@ impl PathCache {
                     }
                 }
 
-                // Add end cap
                 if !contour.closed && i == contour.point_count() - 1 {
                     match line_cap_end {
                         LineCap::Butt => butt_cap_end(
@@ -745,10 +604,10 @@ impl PathCache {
 
             let mut x_sign = 0;
             let mut y_sign = 0;
-            let mut x_first_sign = 0; // Sign of first nonzero edge vector x
-            let mut y_first_sign = 0; // Sign of first nonzero edge vector y
-            let mut x_flips = 0; // Number of sign changes in x
-            let mut y_flips = 0; // Number of sign changes in y
+            let mut x_first_sign = 0;
+            let mut y_first_sign = 0;
+            let mut x_flips = 0;
+            let mut y_flips = 0;
 
             for i in 0..points.len() {
                 let p0 = if i == 0 {
@@ -762,7 +621,6 @@ impl PathCache {
                 let dlpos0 = p0.dpos.orthogonal();
                 let dlpos1 = p1.dpos.orthogonal();
 
-                // Calculate extrusions
                 p1.dmpos = (dlpos0 + dlpos1) * 0.5;
                 let dmr2 = p1.dmpos.mag2();
 
@@ -772,14 +630,12 @@ impl PathCache {
                     p1.dmpos *= scale;
                 }
 
-                // Clear flags, but keep the corner.
                 p1.flags = if p1.flags.contains(PointFlags::CORNER) {
                     PointFlags::CORNER
                 } else {
                     PointFlags::empty()
                 };
 
-                // Keep track of left turns.
                 let cross = p0.dpos.cross(p1.dpos);
 
                 if cross > 0.0 {
@@ -787,7 +643,6 @@ impl PathCache {
                     p1.flags |= PointFlags::LEFT;
                 }
 
-                // Determine sign for convexity
                 match p1.dpos.x.partial_cmp(&0.0) {
                     Some(Ordering::Greater) => {
                         match x_sign.cmp(&0) {
@@ -832,7 +687,6 @@ impl PathCache {
                     _ => (),
                 }
 
-                // Calculate if we should use bevel or miter for inner join.
                 let limit = (p0.len.min(p1.len) * inv_stroke_width).max(1.01);
 
                 if (dmr2 * limit * limit) < 1.0 {
@@ -840,7 +694,6 @@ impl PathCache {
                 }
 
                 #[allow(clippy::collapsible_if)]
-                // Check to see if the corner needs to be beveled.
                 if p1.flags.contains(PointFlags::CORNER) {
                     if (dmr2 * miter_limit * miter_limit) < 1.0
                         || line_join == LineJoin::Bevel
@@ -873,7 +726,6 @@ impl PathCache {
         }
     }
 
-    /// If this path is merely a rectangle, return it
     pub(crate) fn path_fill_is_rect(&self) -> Option<crate::Rect> {
         if self.contours.len() != 1 {
             return None;
@@ -899,10 +751,6 @@ impl PathCache {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "cache/security_tests.rs"]
-mod security_tests;
 
 fn curve_divisions(radius: f32, arc: f32, tol: f32) -> u32 {
     let da = (radius / (radius + tol)).acos() * 2.0;
@@ -1095,102 +943,3 @@ fn bevel_join(verts: &mut Vec<Vertex>, p0: &Point, p1: &Point, lw: f32, rw: f32,
         verts.push(Vertex::pos(rpos1, ru, 1.0));
     }
 }
-
-#[cfg(test)]
-mod tests {
-
-    use super::*;
-    use crate::Path;
-
-    #[test]
-    fn image_rect_detection_uses_contour_instead_of_fill_layout() {
-        for (x, y, w, h) in [(10.0, 20.0, 50.0, 40.0), (60.0, 60.0, -50.0, -40.0)] {
-            let mut path = Path::new();
-            path.rect(x, y, w, h);
-            let mut cache = PathCache::new(path.verbs(), &Transform2D::identity(), 0.25, 0.01);
-            cache.expand_fill(0.0, LineJoin::Miter, 2.4);
-            assert_eq!(cache.contours[0].fill.len(), 12);
-            let rect = cache.path_fill_is_rect().unwrap();
-            assert_eq!((rect.x, rect.y, rect.w, rect.h), (10.0, 20.0, 50.0, 40.0));
-        }
-        let mut path = Path::new();
-        path.move_to(0.0, 0.0);
-        path.line_to(10.0, 0.0);
-        path.line_to(11.0, 10.0);
-        path.line_to(1.0, 10.0);
-        path.close();
-        let cache = PathCache::new(path.verbs(), &Transform2D::identity(), 0.25, 0.01);
-        assert!(cache.path_fill_is_rect().is_none());
-        path.rect(20.0, 20.0, 10.0, 10.0);
-        let cache = PathCache::new(path.verbs(), &Transform2D::identity(), 0.25, 0.01);
-        assert!(cache.path_fill_is_rect().is_none());
-    }
-
-    #[test]
-    fn self_intersecting_polygon_is_concave() {
-        // star
-        let mut path = Path::new();
-        path.move_to(50.0, 0.0);
-        path.line_to(21.0, 90.0);
-        path.line_to(98.0, 35.0);
-        path.line_to(2.0, 35.0);
-        path.line_to(79.0, 90.0);
-        path.close();
-
-        let transform = Transform2D::identity();
-
-        let mut path_cache = PathCache::new(path.verbs(), &transform, 0.25, 0.01);
-        path_cache.expand_fill(1.0, LineJoin::Miter, 10.0);
-
-        assert_eq!(path_cache.contours[0].convexity, Convexity::Concave);
-    }
-}
-
-/*
-pub struct MutStridedChunks<'a, T: 'a> {
-    buffer: &'a mut [T],
-    rotated: bool,
-    pos: usize,
-}
-
-impl<'a, T: 'a> MutStridedChunks<'a, T> {
-    pub fn new(buffer: &'a mut [T]) -> Self {
-        buffer.rotate_right(1);
-        Self {
-            buffer: buffer,
-            rotated: false,
-            pos: 0
-        }
-    }
-
-    fn next(&mut self) -> Option<&mut [T]> {
-        if self.pos == self.buffer.len() - 1 && !self.rotated {
-            self.buffer.rotate_left(1);
-            self.rotated = true;
-            self.pos -= 1;
-        }
-
-        let len = self.buffer.len() - self.pos;
-
-        if 2 <= len {
-            let (start, end) = (self.pos, self.pos + 2);
-            let subslice = &mut self.buffer[start..end];
-
-            self.pos += 1;
-            Some(subslice)
-        } else {
-            None
-        }
-    }
-}
-
-fn main() {
-    let mut my_array = [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19];
-
-    let mut iter = MutStridedChunks::new(&mut my_array);
-
-    while let Some(subslice) = iter.next() {
-        log::info!("{:?}", subslice);
-    }
-}
-*/

@@ -439,4 +439,3 @@ pub fn reset_startups(ui: &MainWindow) {
     let st = ui.global::<AppState>();
     st.set_startups_epoch(bump(&st.get_startups_epoch()));
 }
-

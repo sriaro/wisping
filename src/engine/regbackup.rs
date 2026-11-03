@@ -191,8 +191,17 @@ fn quote(s: &str) -> String {
 }
 
 fn hex(kind: u32, bytes: &[u8]) -> String {
-    let body: Vec<String> = bytes.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("hex({:x}):{}", kind, body.join(","))
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut text = format!("hex({kind:x}):");
+    text.reserve(bytes.len().saturating_mul(3));
+    for (index, byte) in bytes.iter().enumerate() {
+        if index != 0 {
+            text.push(',');
+        }
+        text.push(DIGITS[(byte >> 4) as usize] as char);
+        text.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    text
 }
 
 fn sz_data(bytes: &[u8]) -> String {
@@ -219,11 +228,6 @@ pub fn value_line(name: &str, vtype: &RegType, bytes: &[u8]) -> io::Result<Strin
         _ => return Err(io::Error::other("unsupported value type")),
     };
     Ok(format!("{}={}", quote(name), data))
-}
-
-pub fn export_value(hive: Hive, key_path: &str, value_name: &str, dir: &Path) -> io::Result<()> {
-    let key = hive.open(key_path)?;
-    export_open_value(hive, key_path, &key, value_name, dir)
 }
 
 pub(super) fn export_open_value(hive: Hive, key_path: &str, key: &RegKey, value_name: &str, dir: &Path) -> io::Result<()> {

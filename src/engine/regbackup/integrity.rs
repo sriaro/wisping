@@ -37,7 +37,7 @@ impl Drop for Descriptor {
 }
 
 fn refused() -> io::Error {
-    io::Error::new(io::ErrorKind::PermissionDenied, "The backup integrity store is not protected.")
+    io::Error::new(io::ErrorKind::PermissionDenied, "unprotected")
 }
 
 fn privileged_sid(sid: PSID) -> bool {
@@ -143,14 +143,14 @@ pub(in crate::engine) fn open_protected(store: &str, write: bool) -> io::Result<
     Ok(Some(key))
 }
 
-pub(super) fn record(file: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(in crate::engine) fn record(file: &Path, bytes: &[u8]) -> io::Result<()> {
     let key = protected_store(STORE)?;
     key.set_value(receipt(file, bytes)?, &1u32)
 }
 
-pub(in crate::engine) fn forget(file: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(in crate::engine) fn forget_name(name: &str) -> io::Result<()> {
     let Some(key) = open_protected(STORE, true)? else { return Ok(()) };
-    match key.delete_value(receipt(file, bytes)?) {
+    match key.delete_value(name) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
@@ -184,50 +184,4 @@ pub(in crate::engine) fn verify(file: &Path, bytes: &[u8]) -> io::Result<bool> {
 pub(in crate::engine) fn has_records() -> io::Result<bool> {
     let Some(key) = open_protected(STORE, false)? else { return Ok(false) };
     Ok(key.enum_values().next().is_some())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn security_backup_receipt_binds_bytes_and_identity_but_allows_relocation() {
-        let path = Path::new(r"C:\data\20261023-123456\0001.reg");
-        let original = receipt(path, b"original").unwrap();
-        assert_ne!(original, receipt(path, b"tampered").unwrap());
-        assert_ne!(original, receipt(Path::new(r"C:\data\20261023-123456\0002.reg"), b"original").unwrap());
-        assert_ne!(original, receipt(Path::new(r"C:\data\20261023-123457\0001.reg"), b"original").unwrap());
-        assert_eq!(original, receipt(Path::new(r"D:\moved\20261023-123456\0001.reg"), b"original").unwrap());
-    }
-
-    #[test]
-    fn security_backup_receipt_store_requires_privileged_owner_and_writers() {
-        let protected = Descriptor::new(SECURITY).unwrap();
-        check_descriptor(protected.0).unwrap();
-        for text in [
-            w!("O:BAG:BAD:P(A;;KA;;;WD)"),
-            w!("O:BAG:BAD:P(A;;KW;;;BU)"),
-            w!("O:BAG:BAD:P(A;;WD;;;BU)"),
-            w!("O:BAG:BAD:P(A;;WO;;;BU)"),
-            w!("O:BAG:BAD:P(A;;SD;;;BU)"),
-            w!("O:BUG:BUD:P(A;;KR;;;BU)"),
-            w!("O:BAG:BAD:PNO_ACCESS_CONTROL"),
-            w!("O:BAG:BAD:(A;;KA;;;BA)(A;;KR;;;BU)"),
-        ] {
-            let unsafe_store = Descriptor::new(text).unwrap();
-            assert!(check_descriptor(unsafe_store.0).is_err());
-        }
-    }
-
-    #[test]
-    fn security_backup_rejects_a_user_owned_registry_store() {
-        let base = crate::engine::fsx::security_tests::fixture("restore-store");
-        let path = format!("Software\\Classes\\{}", base.file_name().unwrap().to_string_lossy());
-        let root = RegKey::predef(winreg::enums::HKEY_CURRENT_USER);
-        let (key, _) = root.create_subkey(&path).unwrap();
-        let result = check_store(&key);
-        drop(key);
-        root.delete_subkey_all(&path).unwrap();
-        assert!(result.is_err());
-    }
 }

@@ -15,13 +15,10 @@ impl Shader {
     pub fn new(context: &Rc<glow::Context>, src: &str, kind: u32) -> Result<Self, ErrorKind> {
         let id = unsafe { context.create_shader(kind).unwrap() };
 
-        // Compile
         unsafe {
             context.shader_source(id, src);
             context.compile_shader(id);
         }
-
-        // Validate
 
         let success = unsafe { context.get_shader_compile_status(id) };
         if !success {
@@ -68,7 +65,6 @@ impl Program {
             id: unsafe { context.create_program().unwrap() },
         };
 
-        // Attach stages
         for shader in shaders {
             unsafe {
                 context.attach_shader(program.id, shader.id());
@@ -85,8 +81,6 @@ impl Program {
             context.link_program(program.id);
         }
 
-        // Check for error
-
         let success = unsafe { context.get_program_link_status(program.id) };
 
         if !success {
@@ -95,7 +89,6 @@ impl Program {
             return Err(ErrorKind::ShaderLinkError(error));
         }
 
-        // Detach stages
         for shader in shaders {
             unsafe {
                 context.detach_shader(program.id, shader.id());

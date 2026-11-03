@@ -1,5 +1,5 @@
 import { Theme, T } from "../theme.slint";
-import { Glass, Pill, PrimaryButton, SecondaryButton, ListGroup, ProgressStrip, SegTabs, Sq } from "../widgets.slint";
+import { Glass, Pill, PrimaryButton, SecondaryButton, ProgressStrip, SegTabs, Sq, VirtualList } from "../widgets.slint";
 import { PageFrame, EmptyState } from "common.slint";
 import { Intro, FadeText } from "../motion.slint";
 
@@ -179,7 +179,8 @@ component RowView inherits Rectangle {
 
     Rectangle {
         opacity: Theme.page-a;
-        background: ta.has-hover ? Theme.hover : transparent;
+        background: ta.pressed ? Theme.press : ta.has-hover ? Theme.hover : transparent;
+        animate background { duration: Theme.calm ? 0ms : (ta.pressed ? 70ms : 140ms); }
     }
 
     HorizontalLayout {
@@ -253,7 +254,10 @@ component Crumbs inherits Rectangle {
                 Rectangle {
                     border-radius: 8px;
                     opacity: Theme.page-a;
-                    background: ta.has-hover ? Theme.hover : transparent;
+                    background: ta.pressed ? Theme.press : ta.has-hover ? Theme.hover : transparent;
+                    transform-scale: ta.pressed ? 0.92 : 1.0;
+                    animate background { duration: Theme.calm ? 0ms : (ta.pressed ? 60ms : 130ms); }
+                    animate transform-scale { duration: Theme.calm ? 0ms : 90ms; easing: ease-out; }
                 }
                 label := Text {
                     opacity: Theme.page-a;
@@ -517,36 +521,17 @@ export component DiskPage inherits PageFrame {
                 }
                 Rectangle {
                     vertical-stretch: 1;
-                    for e in DiskState.list-epoch: holder := Rectangle {
-                        property <bool> settled: false;
-                        property <int> want: min(DiskState.rows.length, ceil(self.height / 46px) + 2);
-                        property <int> count: 0;
-                        init => {
-                            self.count = self.want;
-                        }
-                        changed want => {
-                            self.count = self.want;
-                        }
-                        Timer {
-                            interval: 1400ms;
-                            running: !holder.settled;
-                            triggered => {
-                                holder.settled = true;
-                            }
-                        }
-                        if holder.count > 0: lg := ListGroup {
-                            property <int> first: max(0, min(floor(self.scroll-y / 46px), DiskState.rows.length - holder.count));
-                            limit: parent.height;
-                            width: parent.width;
-                            Rectangle {
-                                height: DiskState.rows.length * 46px;
-                                for k in holder.count: RowView {
-                                    y: (lg.first + k) * 46px;
-                                    r: DiskState.rows[lg.first + k];
-                                    last: lg.first + k == DiskState.rows.length - 1;
-                                    order: k;
-                                    settled: holder.settled;
-                                }
+                    if DiskState.rows.length > 0: vl := VirtualList {
+                        reset: DiskState.list-epoch[0];
+                        length: DiskState.rows.length;
+                        row-height: 46px;
+                        for e in DiskState.list-epoch: Rectangle {
+                            for k in vl.count: RowView {
+                                y: (vl.first + k) * 46px;
+                                r: DiskState.rows[vl.first + k];
+                                last: vl.first + k == DiskState.rows.length - 1;
+                                order: k;
+                                settled: vl.settled;
                             }
                         }
                     }

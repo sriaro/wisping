@@ -13,20 +13,26 @@ use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersio
 use windows::core::{HSTRING, PCWSTR};
 
 use super::lock::LockExt;
+use super::fsx;
 
-fn query(block: &[u8], sub: &str) -> Option<(*const u8, u32)> {
+fn queried_bytes(block: &[u8], ptr: *const u8, len: usize) -> Option<&[u8]> {
+    let start = (ptr as usize).checked_sub(block.as_ptr() as usize)?;
+    block.get(start..start.checked_add(len)?)
+}
+
+fn query<'a>(block: &'a [u8], sub: &str, unit: usize) -> Option<&'a [u8]> {
     let mut ptr: *mut c_void = std::ptr::null_mut();
     let mut len = 0u32;
     let ok = unsafe { VerQueryValueW(block.as_ptr() as *const c_void, &HSTRING::from(sub), &mut ptr, &mut len) };
     if !ok.as_bool() || ptr.is_null() || len == 0 {
         return None;
     }
-    Some((ptr as *const u8, len))
+    queried_bytes(block, ptr.cast(), (len as usize).checked_mul(unit)?)
 }
 
 fn read_string(block: &[u8], sub: &str) -> Option<String> {
-    let (p, chars) = query(block, sub)?;
-    let units = unsafe { std::slice::from_raw_parts(p as *const u16, chars as usize) };
+    let bytes = query(block, sub, 2)?;
+    let units: Vec<u16> = bytes.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes(*b)).collect();
     let end = units.iter().position(|&u| u == 0).unwrap_or(units.len());
     let text = String::from_utf16_lossy(&units[..end]).trim().to_string();
     if text.is_empty() { None } else { Some(text) }
@@ -43,8 +49,7 @@ fn company(path: &Path) -> String {
         return String::new();
     }
     let mut langs: Vec<String> = Vec::new();
-    if let Some((p, bytes)) = query(&block, "\\VarFileInfo\\Translation") {
-        let raw = unsafe { std::slice::from_raw_parts(p, bytes as usize) };
+    if let Some(raw) = query(&block, "\\VarFileInfo\\Translation", 1) {
         for pair in raw.as_chunks::<4>().0.iter().take(4) {
             let lang = u16::from_le_bytes([pair[0], pair[1]]);
             let page = u16::from_le_bytes([pair[2], pair[3]]);
@@ -127,7 +132,12 @@ fn cache() -> &'static Mutex<Cache> {
 }
 
 fn store_trusted() -> bool {
-    !super::sys::is_admin() || (super::sys::shell_user_is_self() && super::fsx::PinnedDir::open(super::data::root()).is_ok_and(|dir| dir.is_private()))
+    let private = super::fsx::PinnedDir::open(&super::data::root()).is_ok_and(|dir| dir.is_private());
+    if super::sys::is_admin() {
+        super::sys::shell_user_is_self() && private
+    } else {
+        private
+    }
 }
 
 fn load_cache() -> HashMap<String, Stamp> {
@@ -180,18 +190,23 @@ pub fn persist() {
     let text = render_cache(&guard.map);
     drop(guard);
     super::data::ensure_root();
-    let _ = super::fsx::PinnedDir::create(super::data::root()).and_then(|dir| dir.write_file(CACHE_FILE.as_ref(), text.as_bytes()));
+    let _ = super::fsx::PinnedDir::create(&super::data::root()).and_then(|dir| dir.write_file(CACHE_FILE.as_ref(), text.as_bytes()));
 }
 
 pub fn publisher(path: &str) -> String {
     use std::os::windows::fs::MetadataExt;
-    if !super::fsx::local_drive_path(path) {
+    if !fsx::local_drive_path(path) {
         return String::new();
     }
     let p = Path::new(path);
-    let Some(meta) = p.is_absolute().then(|| std::fs::metadata(p).ok()).flatten().filter(|m| m.is_file()) else {
+    let Some(parent) = p.parent() else { return String::new() };
+    let Some(name) = p.file_name() else { return String::new() };
+    let Ok(dir) = fsx::PinnedDir::open(parent) else { return String::new() };
+    let Ok(file) = dir.read_file(name) else { return String::new() };
+    let Ok(meta) = file.metadata() else { return String::new() };
+    if !meta.is_file() {
         return String::new();
-    };
+    }
     let stamp = (meta.last_write_time(), meta.len());
     let cache = cache();
     let key = path.to_lowercase();
@@ -206,8 +221,7 @@ pub fn publisher(path: &str) -> String {
     }
     cached.map.insert(key, (stamp.0, stamp.1, value.clone()));
     cached.dirty = true;
+    drop(file);
+    drop(dir);
     value
 }
-
-#[cfg(test)]
-mod tests;

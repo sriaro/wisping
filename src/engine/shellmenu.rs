@@ -73,14 +73,6 @@ fn blocked_names(hive: Hive) -> Vec<String> {
     hive.open(BLOCKED).map(|key| key.enum_values().flatten().map(|item| item.0.to_lowercase()).collect()).unwrap_or_default()
 }
 
-fn blocked_in(hive: Hive, clsid: &str) -> bool {
-    blocked_names(hive).contains(&clsid.to_lowercase())
-}
-
-pub fn is_blocked(clsid: &str) -> bool {
-    blocked_in(Hive::Machine, clsid) || blocked_in(Hive::User, clsid)
-}
-
 pub fn list() -> Vec<StartupEntry> {
     let blocked: HashSet<String> = blocked_names(Hive::Machine).into_iter().chain(blocked_names(Hive::User)).collect();
     let mut out = Vec::new();
@@ -154,12 +146,8 @@ fn locate(hive: Hive, key: &str) -> Option<bool> {
         return None;
     }
     let lower = key.to_lowercase();
-    let mut prefixes = vec![format!("{}\\", classes(hive).to_lowercase())];
-    let mut roots: Vec<String> = ROOTS.iter().map(|r| r.0.to_lowercase()).collect();
-    if registry::allow_test_key() && hive == Hive::User {
-        prefixes.push(format!("{}\\", registry::TEST_KEY.to_lowercase()));
-        roots.push("ctxtest".to_string());
-    }
+    let prefixes = vec![format!("{}\\", classes(hive).to_lowercase())];
+    let roots: Vec<String> = ROOTS.iter().map(|r| r.0.to_lowercase()).collect();
     for prefix in prefixes {
         let Some(rest) = lower.strip_prefix(&prefix) else { continue };
         for root in &roots {

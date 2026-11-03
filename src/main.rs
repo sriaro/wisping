@@ -9,8 +9,6 @@ mod i18n_zh;
 mod motion;
 mod notice;
 mod pages;
-mod preview;
-mod selftest;
 mod silent;
 mod views;
 mod winui;
@@ -63,30 +61,14 @@ fn harden_dll_search() {
 
 fn main() {
     harden_dll_search();
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() >= 2 && args[1] == "--render" && engine::sys::is_admin() {
-        std::process::exit(2);
-    }
-    if args.len() >= 2 && args[1] == "--clean" {
-        std::process::exit(silent::clean());
-    }
-    if args.len() >= 3 && args[1] == "--selftest" {
-        std::process::exit(if selftest::run(&args[2]) { 0 } else { 1 });
-    }
-    if args.len() >= 3 && args[1] == "--render" {
-        let dir = args[2].clone();
-        std::panic::set_hook(Box::new({
-            let dir = dir.clone();
-            move |info| {
-                let _ = std::fs::create_dir_all(&dir);
-                let _ = std::fs::write(std::path::Path::new(&dir).join("error.txt"), info.to_string());
-            }
-        }));
-        preview::run(&dir);
-        return;
-    }
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let relaunch = match args.as_slice() {
+        [] => false,
+        [arg] if arg == "--relaunch" => true,
+        [arg] if arg == "--clean" => std::process::exit(silent::clean()),
+        _ => std::process::exit(2),
+    };
     install_panic_hook();
-    let relaunch = args.iter().any(|a| a == "--relaunch");
     if !winui::claim_instance(if relaunch { 6000 } else { 0 }) && winui::activate_existing(5000) {
         return;
     }

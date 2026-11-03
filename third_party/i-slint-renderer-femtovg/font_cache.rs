@@ -1,8 +1,6 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-// cspell:ignore Noto fontconfig
-
 use femtovg::TextContext;
 use i_slint_common::sharedfontique::HashedBlob;
 use i_slint_core::textlayout::sharedparley::parley;

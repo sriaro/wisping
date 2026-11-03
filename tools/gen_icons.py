@@ -38,7 +38,7 @@ os.makedirs(OUT, exist_ok=True)
 for name, body in ICONS.items():
     svg = (
         '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" '
-        'stroke="#000000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + body + "</svg>\n"
+        'stroke="#ffffff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + body + "</svg>\n"
     )
     with open(os.path.join(OUT, name + ".svg"), "w", encoding="utf-8", newline="\n") as f:
         f.write(svg)

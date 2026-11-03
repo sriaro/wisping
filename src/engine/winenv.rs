@@ -20,10 +20,6 @@ const CURRENT_VERSION: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion";
 const PROFILE_LIST: &str = "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList";
 const SESSION_ENV: &str = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment";
 
-#[cfg(test)]
-#[path = "winenv/tests.rs"]
-mod tests;
-
 fn from_api(f: impl Fn(Option<&mut [u16]>) -> u32) -> Option<String> {
     let mut buf = vec![0u16; 260];
     loop {

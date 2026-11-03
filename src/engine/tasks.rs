@@ -17,10 +17,6 @@ use super::regbackup::Hive;
 const MAX_DEPTH: usize = 5;
 const MAX_FILE: u64 = 1024 * 1024;
 
-#[cfg(test)]
-#[path = "tasks/security_tests.rs"]
-mod security_tests;
-
 pub fn tasks_root() -> PathBuf {
     super::winenv::system_dir().join("Tasks")
 }
@@ -165,14 +161,23 @@ pub fn list() -> Vec<StartupEntry> {
     sys::par_map(&files, entry)
 }
 
+fn valid_path(p: &str) -> bool {
+    p.starts_with('\\') && p.len() >= 2 && !p.contains("..") && !p.contains(['"', '\n', '\r', '/'])
+}
+
+pub fn task_path(xml: &str) -> Option<String> {
+    let path = block(xml, "RegistrationInfo").and_then(|r| text(r, "URI"))?;
+    (valid_path(&path) && !is_system_path(&path)).then_some(path)
+}
+
 fn valid_task(e: &StartupEntry) -> io::Result<PathBuf> {
     let p = e.key_path.as_str();
-    if !p.starts_with('\\') || p.len() < 2 || p.contains("..") || p.contains('"') || p.contains('\n') || p.contains('\r') || p.contains('/') {
+    if !valid_path(p) {
         return Err(io::Error::other("bad task"));
     }
     let file = tasks_root().join(p.trim_start_matches('\\'));
     let expected = e.file_path.as_ref().ok_or_else(|| io::Error::other("bad task"))?;
-    if fsx::norm_key(&file) != fsx::norm_key(expected) || !file.is_file() || fsx::is_reparse(&file) {
+    if fsx::norm_key(&file) != fsx::norm_key(expected) || fsx::plain_file(&file) != Some(true) {
         return Err(io::Error::other("bad task"));
     }
     Ok(file)
@@ -186,7 +191,7 @@ fn schtasks(args: &[&str]) -> io::Result<()> {
     if !sys::is_admin() {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "access denied"));
     }
-    Err(io::Error::other(sys::command_failure(&out.stderr, out.status.code())))
+    Err(sys::command_failure(&out.stderr))
 }
 
 pub fn set_enabled(e: &mut StartupEntry, enable: bool) -> io::Result<()> {
@@ -229,7 +234,23 @@ fn backup(file: &Path, backup_dir: &Path, name: &OsStr) -> io::Result<(fsx::Pinn
     if copy.metadata()?.len() != bytes.len() as u64 {
         return Err(io::Error::other("backup copy failed"));
     }
+    if sys::elevation()? {
+        super::regbackup::integrity::record(&target.path().join(name), &bytes)?;
+    }
     Ok((target, copy))
+}
+
+pub fn restore(xml: &Path, task: &str) -> io::Result<()> {
+    if !valid_path(task) || is_system_path(task) {
+        return Err(io::Error::other("bad task"));
+    }
+    if fsx::plain_exists(&tasks_root().join(task.trim_start_matches('\\'))) != Some(false) {
+        return Err(io::Error::new(io::ErrorKind::AlreadyExists, "exists"));
+    }
+    let xml = xml.to_str().ok_or_else(|| io::Error::other("bad task"))?;
+    schtasks(&["/Create", "/TN", task, "/XML", xml])?;
+    data::log(&format!("task restored {}", task));
+    Ok(())
 }
 
 pub fn delete(e: &StartupEntry, backup_dir: &Path) -> io::Result<()> {

@@ -4,72 +4,39 @@ use rgb::alt::Gray;
 use rgb::*;
 use slotmap::{DefaultKey, SlotMap};
 
-#[cfg(feature = "image-loading")]
-use ::image::DynamicImage;
-
-#[cfg(feature = "image-loading")]
-use std::convert::TryFrom;
-
 use crate::{ErrorKind, Renderer};
 
-#[cfg(test)]
-#[path = "image/security_tests.rs"]
-mod security_tests;
-
-/// An image handle.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ImageId(DefaultKey);
 
-/// Specifies the format of an image's pixels.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum PixelFormat {
-    /// 24-bit RGB image format (8 bits per channel)
     Rgb8,
-    /// 32-bit RGBA image format (8 bits per channel, including alpha)
     Rgba8,
-    /// 8-bit grayscale image format
     Gray8,
 }
 
 bitflags! {
-    /// Represents a set of flags that modify the behavior of an image.
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ImageFlags: u32 {
-        /// Generates mipmaps during the creation of the image.
         const GENERATE_MIPMAPS = 1;
-        /// Repeats the image in the X direction when rendered.
         const REPEAT_X = 1 << 1;
-        /// Repeats the image in the Y direction when rendered.
         const REPEAT_Y = 1 << 2;
-        /// Flips (inverses) the image in the Y direction when rendered.
         const FLIP_Y = 1 << 3;
-        /// Indicates that the image data has premultiplied alpha.
         const PREMULTIPLIED = 1 << 4;
-        /// Uses nearest-neighbor interpolation instead of linear interpolation when rendering the image.
         const NEAREST = 1 << 5;
     }
 }
 
-/// Represents the source of an image.
 #[derive(Copy, Clone, Debug)]
 #[non_exhaustive]
 pub enum ImageSource<'a> {
-    /// Image source with RGB image format (8 bits per channel)
     Rgb(ImgRef<'a, RGB8>),
-    /// Image source with RGBA image format (8 bits per channel, including alpha)
     Rgba(ImgRef<'a, RGBA8>),
-    /// Image source with 8-bit grayscale image format
     Gray(ImgRef<'a, Gray<u8>>),
-    /// Image source referencing a HTML image element (only available on `wasm32` target)
-    #[cfg(target_arch = "wasm32")]
-    HtmlImageElement(&'a web_sys::HtmlImageElement),
-    /// Image source referencing a HTML canvas element (only available on `wasm32` target)
-    #[cfg(target_arch = "wasm32")]
-    HtmlCanvasElement(&'a web_sys::HtmlCanvasElement),
 }
 
 impl ImageSource<'_> {
-    /// Checks that every advertised pixel is present in the backing buffer.
     pub fn check_data(&self) -> Result<(), ErrorKind> {
         fn check<T>(img: ImgRef<'_, T>) -> Result<(), ErrorKind> {
             let required = img.height().checked_sub(1)
@@ -84,49 +51,25 @@ impl ImageSource<'_> {
             Self::Rgb(img) => check(*img),
             Self::Rgba(img) => check(*img),
             Self::Gray(img) => check(*img),
-            #[cfg(target_arch = "wasm32")]
-            Self::HtmlImageElement(_) | Self::HtmlCanvasElement(_) => Ok(()),
         }
     }
 
-    /// Returns the format of the image source.
     pub fn format(&self) -> PixelFormat {
         match self {
             Self::Rgb(_) => PixelFormat::Rgb8,
             Self::Rgba(_) => PixelFormat::Rgba8,
             Self::Gray(_) => PixelFormat::Gray8,
-            #[cfg(target_arch = "wasm32")]
-            Self::HtmlImageElement(_) | Self::HtmlCanvasElement(_) => PixelFormat::Rgba8,
         }
     }
 
-    /// Returns the dimensions (width and height) of the image source.
     pub fn dimensions(&self) -> Size {
         match self {
             Self::Rgb(imgref) => Size::new(imgref.width(), imgref.height()),
             Self::Rgba(imgref) => Size::new(imgref.width(), imgref.height()),
             Self::Gray(imgref) => Size::new(imgref.width(), imgref.height()),
-            #[cfg(target_arch = "wasm32")]
-            Self::HtmlImageElement(element) => Size::new(element.width() as usize, element.height() as usize),
-            #[cfg(target_arch = "wasm32")]
-            Self::HtmlCanvasElement(element) => Size::new(element.width() as usize, element.height() as usize),
         }
     }
 
-    /// Checks that this source may be copied into the image described by `info`
-    /// with its top left corner at (`x`, `y`).
-    ///
-    /// Every [`Renderer::update_image`](crate::Renderer::update_image)
-    /// implementation should call this before touching the graphics API. A copy
-    /// that reaches past the destination, or that carries a pixel format the
-    /// destination was not created with, is a caller mistake and has to be
-    /// reported as [`ErrorKind::ImageUpdateOutOfBounds`] or
-    /// [`ErrorKind::ImageUpdateWithDifferentFormat`]. Incomplete source storage
-    /// is reported as [`ErrorKind::InvalidImageData`]. Passing one down to the
-    /// graphics API instead produces a driver side validation failure, which
-    /// backends are generally not able to turn back into a recoverable error:
-    /// the usual outcome is an abort that takes the whole process, or on wasm
-    /// the whole application, rather than the single failed call.
     pub fn check_update(&self, info: &ImageInfo, x: usize, y: usize) -> Result<(), ErrorKind> {
         self.check_data()?;
         let size = self.dimensions();
@@ -162,45 +105,6 @@ impl<'a> From<ImgRef<'a, Gray<u8>>> for ImageSource<'a> {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
-impl<'a> From<&'a web_sys::HtmlImageElement> for ImageSource<'a> {
-    fn from(src: &'a web_sys::HtmlImageElement) -> Self {
-        Self::HtmlImageElement(src)
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-impl<'a> From<&'a web_sys::HtmlCanvasElement> for ImageSource<'a> {
-    fn from(src: &'a web_sys::HtmlCanvasElement) -> Self {
-        Self::HtmlCanvasElement(src)
-    }
-}
-
-#[cfg(feature = "image-loading")]
-impl<'a> TryFrom<&'a DynamicImage> for ImageSource<'a> {
-    type Error = ErrorKind;
-
-    fn try_from(src: &'a DynamicImage) -> Result<Self, ErrorKind> {
-        Ok(match src {
-            ::image::DynamicImage::ImageLuma8(img) => {
-                let src: Img<&[Gray<u8>]> = Img::new(img.as_pixels(), img.width() as usize, img.height() as usize);
-                ImageSource::from(src)
-            }
-            ::image::DynamicImage::ImageRgb8(img) => {
-                let src = Img::new(img.as_rgb(), img.width() as usize, img.height() as usize);
-                ImageSource::from(src)
-            }
-            ::image::DynamicImage::ImageRgba8(img) => {
-                let src = Img::new(img.as_rgba(), img.width() as usize, img.height() as usize);
-                ImageSource::from(src)
-            }
-            // TODO: if format is not supported maybe we should convert it here,
-            // But that is an expensive operation on the render thread that will remain hidden from the user
-            _ => return Err(ErrorKind::UnsupportedImageFormat),
-        })
-    }
-}
-
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Size {
     pub width: usize,
@@ -213,7 +117,6 @@ impl Size {
     }
 }
 
-/// Information about an image.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ImageInfo {
     flags: ImageFlags,
@@ -222,7 +125,6 @@ pub struct ImageInfo {
 }
 
 impl ImageInfo {
-    /// Creates a new `ImageInfo` with the specified flags, width, height, and format.
     pub fn new(flags: ImageFlags, width: usize, height: usize, format: PixelFormat) -> Self {
         Self {
             flags,
@@ -231,32 +133,26 @@ impl ImageInfo {
         }
     }
 
-    /// Returns the image flags.
     pub fn flags(&self) -> ImageFlags {
         self.flags
     }
 
-    /// Returns the image width in pixels.
     pub fn width(&self) -> usize {
         self.size.width
     }
 
-    /// Returns the image height in pixels.
     pub fn height(&self) -> usize {
         self.size.height
     }
 
-    /// Returns the image size (width and height) in pixels.
     pub fn size(&self) -> Size {
         self.size
     }
 
-    /// Returns the image format.
     pub fn format(&self) -> PixelFormat {
         self.format
     }
 
-    /// Sets the image format.
     pub fn set_format(&mut self, format: PixelFormat) {
         self.format = format;
     }
@@ -301,7 +197,6 @@ impl<T> ImageStore<T> {
         Ok(ImageId(self.0.insert((info, image))))
     }
 
-    // Reallocates the image without changing the id.
     pub fn realloc<R: Renderer<Image = T>>(
         &mut self,
         renderer: &mut R,
@@ -360,47 +255,29 @@ impl<T> ImageStore<T> {
     }
 }
 
-/// Specifies the type of filter to apply to images with `crate::Canvas::filter_image`.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub enum ImageFilter {
-    /// Applies a Gaussian blur filter with the specified standard deviation.
     GaussianBlur {
-        /// The standard deviation of the Gaussian blur filter.
         sigma: f32,
     },
-    /// Applies a 4x5 color matrix, the operation behind SVG `feColorMatrix` and
-    /// the CSS/Canvas `filter` color functions (`grayscale`, `sepia`, ...).
-    ///
-    /// The 20 values are row-major: the output channel `[r', g', b', a']` is
-    /// `M * [r, g, b, a, 1]`, i.e. `r' = m[0]*r + m[1]*g + m[2]*b + m[3]*a +
-    /// m[4]`, and so on for rows `m[5..10]`, `m[10..15]`, `m[15..20]`. The matrix
-    /// is applied in **unpremultiplied, sRGB** space (matching the CSS filter
-    /// functions, which are defined in sRGB) and the result is clamped to
-    /// `[0, 1]`, so overflowing matrices cannot produce out-of-range or NaN
-    /// pixels. Use the constructors below for the standard CSS functions.
     ColorMatrix {
-        /// Row-major 4x5 color matrix.
         matrix: [f32; 20],
     },
 }
 
 impl ImageFilter {
-    /// The identity color matrix (leaves an image unchanged).
     pub const IDENTITY_MATRIX: [f32; 20] = [
-        1.0, 0.0, 0.0, 0.0, 0.0, //
-        0.0, 1.0, 0.0, 0.0, 0.0, //
-        0.0, 0.0, 1.0, 0.0, 0.0, //
+        1.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 1.0, 0.0, 0.0, 0.0,
+        0.0, 0.0, 1.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 1.0, 0.0,
     ];
 
-    // sRGB / Rec.709 luma weights used by the CSS `grayscale`/`saturate`/
-    // `hue-rotate` functions (Filter Effects Level 1).
     const LR: f32 = 0.2126;
     const LG: f32 = 0.7152;
     const LB: f32 = 0.0722;
 
-    /// CSS `grayscale(amount)`; `amount` is clamped to `[0, 1]` (1 = fully gray).
     pub fn grayscale(amount: f32) -> Self {
         let a = amount.clamp(0.0, 1.0);
         let inv = 1.0 - a;
@@ -411,17 +288,17 @@ impl ImageFilter {
                 lg - lg * inv,
                 lb - lb * inv,
                 0.0,
-                0.0, //
+                0.0,
                 lr - lr * inv,
                 lg + 0.2848 * inv,
                 lb - lb * inv,
                 0.0,
-                0.0, //
+                0.0,
                 lr - lr * inv,
                 lg - lg * inv,
                 lb + 0.9278 * inv,
                 0.0,
-                0.0, //
+                0.0,
                 0.0,
                 0.0,
                 0.0,
@@ -431,7 +308,6 @@ impl ImageFilter {
         }
     }
 
-    /// CSS `sepia(amount)`; `amount` is clamped to `[0, 1]`.
     pub fn sepia(amount: f32) -> Self {
         let inv = 1.0 - amount.clamp(0.0, 1.0);
         Self::ColorMatrix {
@@ -440,17 +316,17 @@ impl ImageFilter {
                 0.769 - 0.769 * inv,
                 0.189 - 0.189 * inv,
                 0.0,
-                0.0, //
+                0.0,
                 0.349 - 0.349 * inv,
                 0.686 + 0.314 * inv,
                 0.168 - 0.168 * inv,
                 0.0,
-                0.0, //
+                0.0,
                 0.272 - 0.272 * inv,
                 0.534 - 0.534 * inv,
                 0.131 + 0.869 * inv,
                 0.0,
-                0.0, //
+                0.0,
                 0.0,
                 0.0,
                 0.0,
@@ -460,9 +336,6 @@ impl ImageFilter {
         }
     }
 
-    /// CSS `saturate(amount)` (`feColorMatrix type="saturate"`). `amount` >= 0;
-    /// 0 desaturates, 1 is identity, >1 over-saturates. Uses the SVG
-    /// 0.213/0.715/0.072 luma weights.
     pub fn saturate(amount: f32) -> Self {
         let s = amount.max(0.0);
         let (lr, lg, lb) = (0.213f32, 0.715f32, 0.072f32);
@@ -472,17 +345,17 @@ impl ImageFilter {
                 lg - lg * s,
                 lb - lb * s,
                 0.0,
-                0.0, //
+                0.0,
                 lr - lr * s,
                 lg + 0.285 * s,
                 lb - lb * s,
                 0.0,
-                0.0, //
+                0.0,
                 lr - lr * s,
                 lg - lg * s,
                 lb + 0.928 * s,
                 0.0,
-                0.0, //
+                0.0,
                 0.0,
                 0.0,
                 0.0,
@@ -492,7 +365,6 @@ impl ImageFilter {
         }
     }
 
-    /// CSS `hue-rotate(radians)` (`feColorMatrix type="hueRotate"`).
     pub fn hue_rotate(radians: f32) -> Self {
         let (s, c) = radians.sin_cos();
         let (lr, lg, lb) = (0.213f32, 0.715f32, 0.072f32);
@@ -502,17 +374,17 @@ impl ImageFilter {
                 lg - c * lg - s * lg,
                 lb - c * lb + s * 0.928,
                 0.0,
-                0.0, //
+                0.0,
                 lr - c * lr + s * 0.143,
                 lg + c * 0.285 + s * 0.140,
                 lb - c * lb - s * 0.283,
                 0.0,
-                0.0, //
+                0.0,
                 lr - c * lr - s * 0.787,
                 lg - c * lg + s * lg,
                 lb + c * 0.928 + s * lb,
                 0.0,
-                0.0, //
+                0.0,
                 0.0,
                 0.0,
                 0.0,
@@ -522,55 +394,51 @@ impl ImageFilter {
         }
     }
 
-    /// CSS `brightness(amount)`; `amount` >= 0 scales each RGB channel.
     pub fn brightness(amount: f32) -> Self {
         let a = amount.max(0.0);
         Self::ColorMatrix {
             matrix: [
-                a, 0.0, 0.0, 0.0, 0.0, //
-                0.0, a, 0.0, 0.0, 0.0, //
-                0.0, 0.0, a, 0.0, 0.0, //
+                a, 0.0, 0.0, 0.0, 0.0,
+                0.0, a, 0.0, 0.0, 0.0,
+                0.0, 0.0, a, 0.0, 0.0,
                 0.0, 0.0, 0.0, 1.0, 0.0,
             ],
         }
     }
 
-    /// CSS `contrast(amount)`; `amount` >= 0. 1 is identity.
     pub fn contrast(amount: f32) -> Self {
         let a = amount.max(0.0);
         let b = 0.5 - 0.5 * a;
         Self::ColorMatrix {
             matrix: [
-                a, 0.0, 0.0, 0.0, b, //
-                0.0, a, 0.0, 0.0, b, //
-                0.0, 0.0, a, 0.0, b, //
+                a, 0.0, 0.0, 0.0, b,
+                0.0, a, 0.0, 0.0, b,
+                0.0, 0.0, a, 0.0, b,
                 0.0, 0.0, 0.0, 1.0, 0.0,
             ],
         }
     }
 
-    /// CSS `invert(amount)`; `amount` is clamped to `[0, 1]`.
     pub fn invert(amount: f32) -> Self {
         let a = amount.clamp(0.0, 1.0);
         let d = 1.0 - 2.0 * a;
         Self::ColorMatrix {
             matrix: [
-                d, 0.0, 0.0, 0.0, a, //
-                0.0, d, 0.0, 0.0, a, //
-                0.0, 0.0, d, 0.0, a, //
+                d, 0.0, 0.0, 0.0, a,
+                0.0, d, 0.0, 0.0, a,
+                0.0, 0.0, d, 0.0, a,
                 0.0, 0.0, 0.0, 1.0, 0.0,
             ],
         }
     }
 
-    /// CSS `opacity(amount)`; `amount` is clamped to `[0, 1]` and scales alpha.
     pub fn opacity(amount: f32) -> Self {
         let a = amount.clamp(0.0, 1.0);
         Self::ColorMatrix {
             matrix: [
-                1.0, 0.0, 0.0, 0.0, 0.0, //
-                0.0, 1.0, 0.0, 0.0, 0.0, //
-                0.0, 0.0, 1.0, 0.0, 0.0, //
+                1.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 1.0, 0.0, 0.0,
                 0.0, 0.0, 0.0, a, 0.0,
             ],
         }

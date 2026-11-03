@@ -3,8 +3,6 @@
 
 #![doc = include_str!("README.md")]
 #![doc(html_logo_url = "https://slint.dev/logo/slint-logo-square-light.svg")]
-#![cfg_attr(slint_nightly_test, feature(non_exhaustive_omitted_patterns_lint))]
-#![cfg_attr(slint_nightly_test, warn(non_exhaustive_omitted_patterns))]
 
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroU32;
@@ -36,27 +34,15 @@ use self::itemrenderer::CanvasRc;
 mod font_cache;
 mod images;
 mod itemrenderer;
-#[cfg(feature = "opengl")]
 pub mod opengl;
-#[cfg(feature = "wgpu-30")]
-pub mod wgpu;
-#[cfg(feature = "wgpu-30")]
-pub use wgpu::FemtoVGWGPURenderer;
 
 pub trait WindowSurface<R: femtovg::Renderer> {
     fn render_output(&self) -> impl Into<R::RenderOutput>;
-    /// Return [`femtovg::RenderTarget::Image`] to redirect the frame when
-    /// [`Self::render_output`] cannot select an offscreen target, as for OpenGL, which
-    /// renders into whatever framebuffer is bound.
     fn initial_render_target(&self) -> femtovg::RenderTarget {
         femtovg::RenderTarget::Screen
     }
 }
 
-/// Call after every [`femtovg::Canvas::set_size`], which queues a `SetRenderTarget(Screen)` of
-/// its own without updating the cached target. [`femtovg::Canvas::set_render_target`] does
-/// nothing when the target matches that cache, so switch through `Screen` to force the frame's
-/// target to be queued again.
 fn select_render_target<R: femtovg::Renderer>(
     canvas: &mut femtovg::Canvas<R>,
     target: femtovg::RenderTarget,
@@ -67,11 +53,8 @@ fn select_render_target<R: femtovg::Renderer>(
     }
 }
 
-/// Result of [`GraphicsBackend::begin_surface_rendering`]. `Skipped` carries the reason,
-/// which propagates to the caller so it can decide whether to re-arm a redraw.
 pub enum BeginRendering<S> {
     Acquired(S),
-    /// Always [`DrawOutcome::Occluded`] or [`DrawOutcome::Timeout`].
     Skipped(DrawOutcome),
 }
 
@@ -93,19 +76,12 @@ pub trait GraphicsBackend {
         &self,
         callback: impl FnOnce(Option<i_slint_core::api::GraphicsAPI<'_>>) -> R,
     ) -> Result<R, i_slint_core::platform::PlatformError>;
-    /// This function is called by the renderers when the surface needs to be resized, typically
-    /// in response to the windowing system notifying of a change in the window system.
-    /// For most implementations this is a no-op, with the exception for wayland for example.
     fn resize(
         &self,
         width: NonZeroU32,
         height: NonZeroU32,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
-    /// Redirect the full frame drawn by `render` offscreen and read back its pixels, using
-    /// `canvas` if this backend reads back through it. `width` and `height` are the window
-    /// size, guaranteed non-zero by the caller.
-    /// Return `None` if this backend does not support `take_snapshot`.
     fn take_snapshot_pixels(
         &self,
         _canvas: Option<CanvasRc<Self::Renderer>>,
@@ -117,9 +93,6 @@ pub trait GraphicsBackend {
     }
 }
 
-/// Use the FemtoVG renderer when implementing a custom Slint platform where you deliver events to
-/// Slint and want the scene to be rendered using OpenGL. The rendering is done using the [FemtoVG](https://github.com/femtovg/femtovg)
-/// library.
 pub struct FemtoVGRenderer<B: GraphicsBackend> {
     maybe_window_adapter: RefCell<Option<Weak<dyn WindowAdapter>>>,
     rendering_notifier: RefCell<Option<Box<dyn RenderingNotifier>>>,
@@ -131,29 +104,10 @@ pub struct FemtoVGRenderer<B: GraphicsBackend> {
     text_layout_cache: sharedparley::TextLayoutCache,
     rendering_metrics_collector: RefCell<Option<Rc<RenderingMetricsCollector>>>,
     rendering_first_time: Cell<bool>,
-    // Last field, so that it's dropped last and for example the OpenGL context exists and is current when destroying the FemtoVG canvas
     graphics_backend: B,
 }
 
 impl<B: GraphicsBackend> FemtoVGRenderer<B> {
-    #[cfg(feature = "wgpu-30")]
-    pub(crate) fn new_internal(graphics_backend: B) -> Self {
-        Self {
-            maybe_window_adapter: Default::default(),
-            rendering_notifier: Default::default(),
-            canvas: RefCell::new(None),
-            graphics_cache: Default::default(),
-            layer_cache: Default::default(),
-            texture_cache: Default::default(),
-            box_shadow_cache: Default::default(),
-            text_layout_cache: Default::default(),
-            rendering_metrics_collector: Default::default(),
-            rendering_first_time: Cell::new(true),
-            graphics_backend,
-        }
-    }
-
-    /// Render the scene using OpenGL.
     pub fn render(&self) -> Result<(), i_slint_core::platform::PlatformError> {
         self.internal_render_with_post_callback(
             0.,
@@ -196,12 +150,10 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
         let Some((width, height)): Option<(NonZeroU32, NonZeroU32)> =
             window_size.width.try_into().ok().zip(window_size.height.try_into().ok())
         else {
-            // Nothing to render
             return Ok(DrawOutcome::Success);
         };
 
         if self.canvas.borrow().is_none() {
-            // Nothing to render
             return Ok(DrawOutcome::Success);
         }
 
@@ -210,7 +162,6 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
 
         window_inner
             .draw_contents(|components, post_render| -> Result<(), PlatformError> {
-                // self.canvas is checked for being Some(...) at the beginning of this function
                 let canvas = self.canvas.borrow().as_ref().unwrap().clone();
 
                 let window_background_brush =
@@ -218,13 +169,9 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
 
                 {
                     let mut femtovg_canvas = canvas.borrow_mut();
-                    // We pass an integer that is greater than or equal to the scale factor as
-                    // dpi / device pixel ratio as the anti-alias of femtovg needs that to draw text clearly.
-                    // We need to care about that `ceil()` when calculating metrics.
                     femtovg_canvas.set_size(surface_size.width, surface_size.height, scale);
                     select_render_target(&mut femtovg_canvas, render_target);
 
-                    // Clear with window background if it is a solid color otherwise it will drawn as gradient
                     if let Some(Brush::SolidColor(clear_color)) = window_background_brush {
                         femtovg_canvas.clear_rect(
                             0,
@@ -245,9 +192,6 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
 
                 if let Some(notifier_fn) = self.rendering_notifier.borrow_mut().as_mut() {
                     let mut femtovg_canvas = canvas.borrow_mut();
-                    // For the BeforeRendering rendering notifier callback it's important that this happens *after* clearing
-                    // the back buffer, in order to allow the callback to provide its own rendering of the background.
-                    // femtovg's clear_rect() will merely schedule a clear call, so flush right away to make it immediate.
 
                     let commands = femtovg_canvas.flush_to_output(surface.render_output());
                     self.graphics_backend.submit_commands(commands);
@@ -282,9 +226,7 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                     let window_item =
                         window_item_rc.downcast::<i_slint_core::items::WindowItem>().unwrap();
                     if let Brush::SolidColor(..) = window_item.as_pin_ref().background() {
-                        // clear_rect is called earlier
                     } else {
-                        // Draws the window background as gradient
                         item_renderer.draw_rectangle(
                             window_item.as_pin_ref(),
                             &window_item_rc,
@@ -321,8 +263,6 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                 let commands = canvas.borrow_mut().flush_to_output(surface.render_output());
                 self.graphics_backend.submit_commands(commands);
 
-                // Delete any images and layer images (and their FBOs) before making the context not current anymore, to
-                // avoid GPU memory leaks.
                 self.texture_cache.borrow_mut().drain();
                 drop(item_renderer);
                 Ok(())
@@ -350,7 +290,6 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
         })
     }
 
-    #[cfg(any(feature = "wgpu-30", feature = "opengl"))]
     pub(crate) fn reset_canvas(&self, canvas: CanvasRc<B::Renderer>) {
         *self.canvas.borrow_mut() = canvas.into();
         self.rendering_first_time.set(true);
@@ -445,8 +384,6 @@ impl<B: GraphicsBackend> Drop for FemtoVGRenderer<B> {
     }
 }
 
-/// The purpose of this trait is to add internal API that's accessed from the winit/linuxkms backends, but not
-/// public (as the trait isn't re-exported).
 #[doc(hidden)]
 pub trait FemtoVGRendererExt {
     fn new_suspended() -> Self;
@@ -460,22 +397,16 @@ pub trait FemtoVGRendererExt {
     ) -> Result<DrawOutcome, i_slint_core::platform::PlatformError>;
 }
 
-/// The purpose of this trait is to add internal API specific to the OpenGL renderer that's accessed from the winit
-/// backend. In this case, the ability to resume a suspended OpenGL renderer by providing a new context.
 #[doc(hidden)]
-#[cfg(feature = "opengl")]
 pub trait FemtoVGOpenGLRendererExt {
     fn set_opengl_context(
         &self,
-        #[cfg(not(target_arch = "wasm32"))] opengl_context: impl opengl::OpenGLInterface + 'static,
-        #[cfg(target_arch = "wasm32")] html_canvas: web_sys::HtmlCanvasElement,
+        opengl_context: impl opengl::OpenGLInterface + 'static,
     ) -> Result<(), i_slint_core::platform::PlatformError>;
 }
 
 #[doc(hidden)]
 impl<B: GraphicsBackend> FemtoVGRendererExt for FemtoVGRenderer<B> {
-    /// Creates a new renderer in suspended state without OpenGL. Any attempts at rendering, etc. will produce an error,
-    /// until [`Self::set_opengl_context()`] was called successfully.
     fn new_suspended() -> Self {
         Self {
             maybe_window_adapter: Default::default(),
@@ -493,9 +424,7 @@ impl<B: GraphicsBackend> FemtoVGRendererExt for FemtoVGRenderer<B> {
     }
 
     fn clear_graphics_context(&self) -> Result<(), i_slint_core::platform::PlatformError> {
-        // Ensure the context is current before the renderer is destroyed
         self.graphics_backend.with_graphics_api(|api| {
-            // If we've rendered a frame before, then we need to invoke the RenderingTearDown notifier.
             if !self.rendering_first_time.get()
                 && api.is_some()
                 && let Some(callback) = self.rendering_notifier.borrow_mut().as_mut()
@@ -543,22 +472,16 @@ impl<B: GraphicsBackend> FemtoVGRendererExt for FemtoVGRenderer<B> {
     }
 }
 
-#[cfg(feature = "opengl")]
 impl FemtoVGOpenGLRendererExt for FemtoVGRenderer<opengl::OpenGLBackend> {
     fn set_opengl_context(
         &self,
-        #[cfg(not(target_arch = "wasm32"))] opengl_context: impl opengl::OpenGLInterface + 'static,
-        #[cfg(target_arch = "wasm32")] html_canvas: web_sys::HtmlCanvasElement,
+        opengl_context: impl opengl::OpenGLInterface + 'static,
     ) -> Result<(), i_slint_core::platform::PlatformError> {
         self.graphics_backend.set_opengl_context(
             self,
-            #[cfg(not(target_arch = "wasm32"))]
             opengl_context,
-            #[cfg(target_arch = "wasm32")]
-            html_canvas,
         )
     }
 }
 
-#[cfg(feature = "opengl")]
 pub type FemtoVGOpenGLRenderer = FemtoVGRenderer<opengl::OpenGLBackend>;

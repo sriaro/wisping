@@ -11,6 +11,7 @@ pub mod history;
 pub mod known;
 pub mod leftovers;
 pub mod lock;
+pub mod pool;
 pub mod programs;
 pub mod regbackup;
 pub mod report;

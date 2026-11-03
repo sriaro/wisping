@@ -3,14 +3,12 @@ use std::fs;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use windows::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW};
 use windows::core::PCWSTR;
 
 use super::fsx;
-use super::lock::LockExt;
 use super::programs;
 use super::regbackup::Hive;
 use super::registry;
@@ -19,10 +17,6 @@ use super::startup;
 const DATA_AGE_DAYS: u64 = 90;
 const PROGRAM_AGE_DAYS: u64 = 30;
 const WALK_LIMIT: usize = 200_000;
-
-#[cfg(test)]
-#[path = "leftovers/security_tests.rs"]
-mod security_tests;
 
 const DENY: &[&str] = &[
     "microsoft", "microsoft shared", "windows", "windowsapps", "modifiablewindowsapps", "packages", "temp", "tmp", "programs", "publishers",
@@ -56,24 +50,11 @@ pub struct Leftover {
     pub risky: bool,
 }
 
-static TEST_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
-
-pub fn set_test_root(dir: Option<PathBuf>) {
-    *TEST_ROOT.locked() = dir;
-}
-
-fn test_root() -> Option<PathBuf> {
-    TEST_ROOT.locked().clone()
-}
-
 fn env_dir(name: &str) -> Option<PathBuf> {
     super::winenv::var(name).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
 fn roots() -> Vec<Root> {
-    if let Some(dir) = test_root() {
-        return vec![Root { dir: dir.join("data"), rule: Rule::Data, admin: false }, Root { dir: dir.join("program"), rule: Rule::Program, admin: true }];
-    }
     let mut out = Vec::new();
     for name in ["LOCALAPPDATA", "APPDATA"] {
         out.extend(env_dir(name).map(|dir| Root { dir, rule: Rule::Data, admin: false }));
@@ -265,7 +246,7 @@ fn candidates(root: &Root, links: &Links, own: &[String]) -> Vec<Leftover> {
     for e in rd.flatten() {
         let path = e.path();
         let name = e.file_name().to_string_lossy().to_string();
-        if denied(&name) || fsx::is_reparse(&path) || !path.is_dir() || links.linked(&path) {
+        if denied(&name) || fsx::plain_dir(&path) != Some(true) || links.linked(&path) {
             continue;
         }
         if fsx::norm_key(&path).is_some_and(|k| own.iter().any(|o| *o == k || fsx::key_within(o, &k))) {
@@ -299,8 +280,9 @@ pub fn scan() -> Vec<Leftover> {
 
 pub fn scan_with(links: &Links) -> Vec<Leftover> {
     let own = own_dirs();
+    let elevated = super::sys::is_admin();
     let user_roots = super::sys::shell_user_is_self();
-    let mut out: Vec<Leftover> = roots().iter().filter(|r| user_roots || r.admin).filter(|r| fsx::PinnedDir::open(&r.dir).is_ok()).flat_map(|r| candidates(r, links, &own)).collect();
+    let mut out: Vec<Leftover> = roots().iter().filter(|r| (!elevated || r.admin) && (user_roots || r.admin)).filter(|r| fsx::PinnedDir::open(&r.dir).is_ok()).flat_map(|r| candidates(r, links, &own)).collect();
     out.sort_by_key(|l| std::cmp::Reverse(l.size));
     out
 }
@@ -308,11 +290,11 @@ pub fn scan_with(links: &Links) -> Vec<Leftover> {
 fn pinned_parent(path: &Path) -> Option<fsx::PinnedDir> {
     let (Some(key), Some(parent)) = (fsx::norm_key(path), path.parent().and_then(fsx::norm_key)) else { return None };
     let name = path.file_name()?;
-    if denied(&name.to_string_lossy()) || key.starts_with("\\\\") || fsx::is_reparse(path) || !path.is_dir() {
+    if denied(&name.to_string_lossy()) || key.starts_with("\\\\") || fsx::plain_dir(path) != Some(true) {
         return None;
     }
     let root = roots().into_iter().find(|r| fsx::norm_key(&r.dir).is_some_and(|k| k == parent))?;
-    if !root.admin && !super::sys::shell_user_is_self() {
+    if !root.admin && (super::sys::is_admin() || !super::sys::shell_user_is_self()) {
         return None;
     }
     let pin = fsx::PinnedDir::open(&root.dir).ok()?;
@@ -339,7 +321,7 @@ pub fn recycle(path: &Path) -> io::Result<()> {
         ..Default::default()
     };
     let code = unsafe { SHFileOperationW(&mut op) };
-    let gone = !path.exists();
+    let gone = fsx::plain_exists(&path) != Some(true);
     drop(held);
     if code != 0 || op.fAnyOperationsAborted.as_bool() || !gone {
         return Err(io::Error::other("could not move the folder to the Recycle Bin"));

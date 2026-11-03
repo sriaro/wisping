@@ -60,16 +60,12 @@ impl Framebuffer {
                     glow::FRAMEBUFFER_INCOMPLETE_ATTACHMENT => {
                         format!("({status}) Framebuffer incomplete attachment")
                     }
-                    //glow::FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER => format!("({}) Framebuffer incomplete draw buffer", status),
-                    //glow::FRAMEBUFFER_INCOMPLETE_LAYER_TARGETS => format!("({}) Framebuffer incomplete layer targets", status),
-                    //FIXME: will be in next glow release: glow::FRAMEBUFFER_INCOMPLETE_DIMENSIONS => format!("({}) Framebuffer incomplete dimensions", status),
                     glow::FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT => {
                         format!("({status}) Framebuffer incomplete missing attachment")
                     }
                     glow::FRAMEBUFFER_INCOMPLETE_MULTISAMPLE => {
                         format!("({status}) Framebuffer incomplete multisample")
                     }
-                    //glow::FRAMEBUFFER_INCOMPLETE_READ_BUFFER => format!("({}) Framebuffer incomplete read buffer", status),
                     glow::FRAMEBUFFER_UNSUPPORTED => format!("({status}) Framebuffer unsupported"),
                     _ => format!("({status}) Framebuffer not complete!"),
                 };
@@ -98,31 +94,6 @@ impl Framebuffer {
             context.bind_framebuffer(glow::FRAMEBUFFER, None);
         }
     }
-
-    // pub fn blit_to_texture(&self, texture: &GlTexture) {
-    //     let dest_fbo = Self::new(texture);
-
-    //     unsafe {
-    //         glow::BindFramebuffer(glow::READ_FRAMEBUFFER, self.fbo);
-    //         glow::BindFramebuffer(glow::DRAW_FRAMEBUFFER, dest_fbo.fbo);
-
-    //         glow::BlitFramebuffer(
-    //             0,
-    //             0,
-    //             self.width as i32,
-    //             self.height as i32,
-    //             0,
-    //             0,
-    //             dest_fbo.width as i32,
-    //             dest_fbo.height as i32,
-    //             glow::COLOR_BUFFER_BIT,
-    //             glow::NEAREST
-    //         );
-
-    //         glow::BindFramebuffer(glow::READ_FRAMEBUFFER, 0);
-    //         glow::BindFramebuffer(glow::DRAW_FRAMEBUFFER, 0);
-    //     }
-    // }
 }
 
 impl Drop for Framebuffer {

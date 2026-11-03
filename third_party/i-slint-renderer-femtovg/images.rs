@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-#[cfg(not(target_arch = "wasm32"))]
 use i_slint_core::graphics::BorrowedOpenGLTexture;
 use i_slint_core::graphics::euclid;
 use i_slint_core::graphics::{ImageCacheKey, IntSize, SharedImageBuffer, SharedPixelBuffer};
@@ -18,37 +17,15 @@ pub trait TextureImporter
 where
     Self: femtovg::Renderer + Sized,
 {
-    #[cfg(not(target_family = "wasm"))]
     fn convert_opengl_texture(opengl_texture: std::num::NonZero<u32>) -> Self::NativeTexture;
-
-    #[cfg(feature = "unstable-wgpu-30")]
-    fn convert_wgpu_30_texture(wgpu_texture: wgpu_30::Texture) -> Self::NativeTexture;
 }
 
 impl TextureImporter for femtovg::renderer::OpenGl {
-    #[cfg(not(target_family = "wasm"))]
     fn convert_opengl_texture(opengl_texture: std::num::NonZero<u32>) -> Self::NativeTexture {
         glow::NativeTexture(opengl_texture)
     }
-
-    #[cfg(feature = "unstable-wgpu-30")]
-    fn convert_wgpu_30_texture(_wgpu_texture: wgpu_30::Texture) -> Self::NativeTexture {
-        unimplemented!()
-    }
 }
 
-#[cfg(feature = "wgpu-30")]
-impl TextureImporter for femtovg::renderer::WGPURenderer {
-    #[cfg(not(target_family = "wasm"))]
-    fn convert_opengl_texture(_opengl_texture: std::num::NonZero<u32>) -> Self::NativeTexture {
-        todo!()
-    }
-
-    #[cfg(feature = "unstable-wgpu-30")]
-    fn convert_wgpu_30_texture(wgpu_texture: wgpu_30::Texture) -> Self::NativeTexture {
-        wgpu_texture
-    }
-}
 pub struct Texture<R: femtovg::Renderer + TextureImporter> {
     pub id: femtovg::ImageId,
     canvas: CanvasRc<R>,
@@ -125,9 +102,6 @@ impl<R: femtovg::Renderer + TextureImporter> Texture<R> {
         self.id
     }
 
-    // Upload the image to the GPU. This function could take just a canvas as parameter,
-    // but since an upload requires a current context, this is "enforced" by taking
-    // a renderer instead (which implies a current context).
     pub fn new_from_image(
         image: &ImageInner,
         canvas: &CanvasRc<R>,
@@ -138,28 +112,6 @@ impl<R: femtovg::Renderer + TextureImporter> Texture<R> {
         let image_flags = base_image_flags(scaling, tiling);
 
         let image_id = match image {
-            #[cfg(target_arch = "wasm32")]
-            ImageInner::HTMLImage(html_image) => {
-                if html_image.is_loaded() {
-                    // Anecdotal evidence suggests that HTMLImageElement converts to a texture with
-                    // pre-multiplied alpha. It's possible that this is not generally applicable, but it
-                    // is the case for SVGs.
-                    let image_flags = if html_image.is_svg() {
-                        if let Some(target_size) = target_size_for_scalable_source {
-                            let dom_element = &html_image.dom_element;
-                            dom_element.set_width(target_size.width);
-                            dom_element.set_height(target_size.height);
-                        }
-                        image_flags | femtovg::ImageFlags::PREMULTIPLIED
-                    } else {
-                        image_flags
-                    };
-                    canvas.borrow_mut().create_image(&html_image.dom_element, image_flags).unwrap()
-                } else {
-                    return None;
-                }
-            }
-            #[cfg(not(target_arch = "wasm32"))]
             ImageInner::BorrowedOpenGLTexture(BorrowedOpenGLTexture {
                 texture_id,
                 size,
@@ -179,26 +131,6 @@ impl<R: femtovg::Renderer + TextureImporter> Texture<R> {
                     .borrow_mut()
                     .create_image_from_native_texture(
                         <R as TextureImporter>::convert_opengl_texture(*texture_id),
-                        femtovg::ImageInfo::new(
-                            image_flags,
-                            size.width as _,
-                            size.height as _,
-                            femtovg::PixelFormat::Rgba8,
-                        ),
-                    )
-                    .unwrap()
-            }
-            #[cfg(feature = "unstable-wgpu-30")]
-            ImageInner::WGPUTexture(i_slint_core::graphics::WGPUTexture::WGPU30Texture(
-                texture,
-            )) => {
-                let texture = texture.clone();
-                let size = texture.size();
-
-                canvas
-                    .borrow_mut()
-                    .create_image_from_native_texture(
-                        <R as TextureImporter>::convert_wgpu_30_texture(texture),
                         femtovg::ImageInfo::new(
                             image_flags,
                             size.width as _,
@@ -256,8 +188,6 @@ impl TextureCacheKey {
     }
 }
 
-// Cache used to avoid repeatedly decoding images from disk. Entries with a count
-// of 1 are drained after flushing the renderer commands to the screen.
 pub struct TextureCache<R: femtovg::Renderer + TextureImporter>(
     HashMap<TextureCacheKey, Rc<Texture<R>>>,
 );
@@ -269,8 +199,6 @@ impl<R: femtovg::Renderer + TextureImporter> Default for TextureCache<R> {
 }
 
 impl<R: femtovg::Renderer + TextureImporter> TextureCache<R> {
-    // Look up the given image cache key in the image cache and upgrade the weak reference to a strong one if found,
-    // otherwise a new image is created/loaded from the given callback.
     pub(crate) fn lookup_image_in_cache_or_create(
         &mut self,
         cache_key: TextureCacheKey,
@@ -290,14 +218,6 @@ impl<R: femtovg::Renderer + TextureImporter> TextureCache<R> {
 
     pub(crate) fn drain(&mut self) {
         self.0.retain(|_, cached_image| {
-            // * Retain images that are used by elements, so that they can be effectively
-            // shared (one image element refers to foo.png, another element is created
-            // and refers to the same -> share).
-            // * Also retain images that are still loading (async HTML), where the size
-            // is not known yet. Otherwise we end up in a loop where an image is not loaded
-            // yet, we report (0, 0) to the layout, the image gets removed here, the closure
-            // still triggers a load and marks the layout as dirt, which loads the
-            // image again, etc.
             Rc::strong_count(cached_image) > 1 || cached_image.size().is_none()
         });
     }
@@ -313,9 +233,6 @@ fn image_buffer_to_image_source(
     fn image_source<Pixel: Clone>(buffer: &SharedPixelBuffer<Pixel>) -> imgref::ImgRef<'_, Pixel> {
         let pixels = buffer.as_slice();
         let read = buffer.width() as u64 * buffer.height() as u64;
-        // `femtovg::Canvas::create_image` is unsound: it is safe to call, yet it hands the driver
-        // the buffer's pointer along with the pixel count from `ImageSource::dimensions()`, so an
-        // `ImgRef` that overstates its buffer reads out of bounds.
         assert!(pixels.len() as u64 >= read);
         imgref::ImgRef::new(&pixels[..read as usize], buffer.width() as _, buffer.height() as _)
     }

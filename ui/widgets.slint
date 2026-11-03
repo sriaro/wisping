@@ -85,6 +85,7 @@ export component SoftShadow inherits Rectangle {
 export component Glass inherits Rectangle {
     in property <length> radius: 17.5px;
     in property <bool> hot: false;
+    in property <bool> press: false;
     in property <bool> strong: false;
     in property <bool> flat: false;
     in property <float> fade: Theme.page-a;
@@ -99,9 +100,11 @@ export component Glass inherits Rectangle {
         fade: root.fade;
         r: root.big ? 24 : 18;
         colorize: root.strong ? Theme.card-strong : Theme.card;
-        edge: root.hot ? Theme.card-border-hot : Theme.card-border;
+        edge: root.press || root.hot ? Theme.card-border-hot : Theme.card-border;
         edge-width: 1px;
-        animate colorize, edge { duration: Theme.calm ? 0ms : 220ms; easing: ease-out; }
+        transform-scale: root.press ? 0.985 : 1.0;
+        animate colorize, edge { duration: Theme.calm ? 0ms : 180ms; easing: ease-out; }
+        animate transform-scale { duration: Theme.calm ? 0ms : 110ms; easing: ease-out; }
     }
 
     @children
@@ -161,10 +164,10 @@ export component PrimaryButton inherits Rectangle {
     callback clicked;
     property <float> en: enabled ? 1 : 0.4;
     property <float> a: root.en * root.fade;
+    property <float> press-scale: ta.pressed && root.enabled ? 0.985 : 1.0;
+    animate press-scale { duration: Theme.calm ? 0ms : 120ms; easing: ease-out; }
     height: 37px;
     border-radius: 18.5px;
-    transform-scale: ta.pressed && root.enabled ? 0.97 : 1.0;
-    animate transform-scale { duration: 200ms; easing: spring(0); }
     animate en { duration: 160ms; }
 
     SoftShadow {
@@ -177,9 +180,10 @@ export component PrimaryButton inherits Rectangle {
     Rectangle {
         border-radius: root.border-radius;
         border-width: 1px;
-        border-color: Theme.dark ? #ffffff1c : #ffffff55;
+        border-color: #ffffff1c.mix(#ffffff55, Theme.night);
         background: root.danger ? Theme.danger : Theme.accent-gradient;
         opacity: root.a;
+        transform-scale: root.press-scale;
     }
 
     Rectangle {
@@ -189,13 +193,15 @@ export component PrimaryButton inherits Rectangle {
         height: parent.height * 0.5;
         border-radius: self.height / 2;
         opacity: root.a;
-        background: Theme.dark ? @linear-gradient(180deg, #ffffff26 0%, #ffffff00 100%) : @linear-gradient(180deg, #ffffff55 0%, #ffffff00 100%);
+        background: @linear-gradient(180deg, #ffffff26.mix(#ffffff55, Theme.night) 0%, #ffffff00 100%);
+        transform-scale: root.press-scale;
     }
 
     Rectangle {
         border-radius: root.border-radius;
         opacity: root.a;
         background: !root.enabled ? transparent : ta.pressed ? #00000030 : ta.has-hover ? #ffffff26 : transparent;
+        transform-scale: root.press-scale;
         animate background { duration: 120ms; }
     }
 
@@ -239,14 +245,14 @@ export component SecondaryButton inherits Rectangle {
     callback clicked;
     property <float> en: enabled ? 1 : 0.4;
     property <float> a: root.en * root.fade;
+    property <float> press-scale: ta.pressed && root.enabled ? 0.985 : 1.0;
+    animate press-scale { duration: Theme.calm ? 0ms : 120ms; easing: ease-out; }
     height: 37px;
     border-radius: 18.5px;
-    transform-scale: ta.pressed && root.enabled ? 0.97 : 1.0;
-    animate transform-scale { duration: 200ms; easing: spring(0); }
     animate en { duration: 160ms; }
 
     SoftShadow {
-        tint: Theme.dark ? #00000030 : Theme.shadow;
+        tint: #00000030.mix(Theme.shadow, Theme.night);
         blur: 8px;
         dy: 2px;
         fade: root.a;
@@ -258,13 +264,15 @@ export component SecondaryButton inherits Rectangle {
         border-width: 1px;
         border-color: Theme.card-border;
         opacity: root.a;
+        transform-scale: root.press-scale;
     }
 
     Rectangle {
         border-radius: root.border-radius;
         opacity: root.a;
-        background: !root.enabled ? transparent : ta.pressed ? Theme.hover : ta.has-hover ? Theme.hover : transparent;
-        animate background { duration: 120ms; }
+        background: !root.enabled ? transparent : ta.pressed ? Theme.press : ta.has-hover ? Theme.hover : transparent;
+        transform-scale: root.press-scale;
+        animate background { duration: Theme.calm ? 0ms : (ta.pressed ? 60ms : 130ms); }
     }
 
     HorizontalLayout {
@@ -313,14 +321,17 @@ export component IconButton inherits Rectangle {
     Rectangle {
         border-radius: root.size / 2;
         opacity: root.en * root.fade;
-        background: ta.has-hover && root.enabled ? (root.danger ? Theme.danger-soft : Theme.hover) : transparent;
-        animate background { duration: 140ms; }
+        background: !root.enabled ? transparent : ta.pressed ? (root.danger ? Theme.danger.with-alpha(0.22) : Theme.press) : ta.has-hover ? (root.danger ? Theme.danger-soft : Theme.hover) : transparent;
+        transform-scale: ta.pressed && root.enabled ? 0.9 : 1.0;
+        animate background { duration: Theme.calm ? 0ms : (ta.pressed ? 60ms : 130ms); }
+        animate transform-scale { duration: Theme.calm ? 0ms : 100ms; easing: ease-out; }
     }
     Icon {
         kind: root.icon;
         size: root.size * 0.5;
         opacity: root.en * root.fade;
-        colorize: root.danger ? Theme.danger : Theme.text-dim;
+        colorize: root.danger ? Theme.danger : root.enabled && (ta.has-hover || ta.pressed) ? Theme.text : Theme.text-dim;
+        animate colorize { duration: Theme.calm ? 0ms : 120ms; }
     }
     ta := TouchArea {
         mouse-cursor: root.enabled ? pointer : default;
@@ -344,13 +355,22 @@ export component Toggle inherits Rectangle {
     height: 26px;
     border-radius: 13px;
     background: Theme.switch-off.transparentize(1 - root.a);
+    transform-scale: ta.pressed && root.enabled ? 0.96 : 1.0;
     animate en { duration: 160ms; }
     animate lit { duration: 200ms; }
+    animate transform-scale { duration: Theme.calm ? 0ms : 100ms; easing: ease-out; }
 
     Rectangle {
         border-radius: 13px;
         background: Theme.accent-gradient;
         opacity: root.lit * root.a;
+    }
+
+    Rectangle {
+        border-radius: 13px;
+        background: root.enabled && ta.pressed ? Theme.press : Theme.hover;
+        opacity: root.a * (root.enabled && ta.pressed ? 0.9 : root.enabled && ta.has-hover ? 0.55 : 0);
+        animate opacity { duration: Theme.calm ? 0ms : (ta.pressed ? 70ms : 150ms); }
     }
 
     Rectangle {
@@ -366,7 +386,7 @@ export component Toggle inherits Rectangle {
         animate x { duration: 300ms; easing: spring(0.2); }
     }
 
-    TouchArea {
+    ta := TouchArea {
         mouse-cursor: root.enabled ? pointer : default;
         clicked => {
             if (root.enabled) {
@@ -405,10 +425,16 @@ export component RoundCheck inherits Rectangle {
 }
 
 export component Scroller inherits Rectangle {
+    in property <float> fade: 1;
     out property <length> total-height: vl.preferred-height;
     out property <length> scroll-y: -fl.content-y;
+    in property <int> reset: 0;
     property <bool> scrolling: false;
     clip: true;
+
+    changed reset => {
+        fl.content-y = 0px;
+    }
 
     hide-timer := Timer {
         interval: 900ms;
@@ -449,7 +475,7 @@ export component Scroller inherits Rectangle {
         Rectangle {
             border-radius: 2px;
             background: Theme.scroll-thumb;
-            opacity: parent.show;
+            opacity: parent.show * root.fade;
             visible: parent.show > 0.001;
         }
         hover-ta := TouchArea {}
@@ -460,6 +486,7 @@ export component ListGroup inherits Rectangle {
     in property <length> limit: 0px;
     in property <float> fade: Theme.page-a;
     out property <length> scroll-y: sc.scroll-y;
+    in property <int> reset: 0;
     y: 0px;
     height: min(limit, sc.total-height + 2px);
     group-intro := Intro {}
@@ -485,6 +512,7 @@ export component ListGroup inherits Rectangle {
         border-radius: 17px;
         clip: true;
         sc := Scroller {
+            reset: root.reset;
             @children
         }
     }
@@ -493,6 +521,7 @@ export component ListGroup inherits Rectangle {
 export component VirtualList inherits Rectangle {
     in property <int> length: 0;
     in property <length> row-height: 56px;
+    in property <int> reset: 0;
     out property <int> count: 0;
     out property <int> first: max(0, min(floor(lg.scroll-y / root.row-height), root.length - root.count));
     out property <bool> settled: false;
@@ -515,6 +544,7 @@ export component VirtualList inherits Rectangle {
     }
 
     lg := ListGroup {
+        reset: root.reset;
         limit: root.height;
         width: root.width;
         Rectangle {
@@ -527,15 +557,8 @@ export component VirtualList inherits Rectangle {
 export component ProgressStrip inherits Rectangle {
     in property <bool> active: false;
     in property <float> fade: Theme.page-a;
-    property <float> phase: 0;
+    property <float> phase: root.active ? mod(animation-tick() / 1300ms, 1) : 0;
     height: 3px;
-    Timer {
-        interval: 33ms;
-        running: root.active;
-        triggered => {
-            root.phase = mod(root.phase + 0.0254, 1);
-        }
-    }
     Rectangle {
         border-radius: 2px;
         background: (root.active ? Theme.ring-track : transparent).transparentize(1 - root.fade);
@@ -561,20 +584,12 @@ export component HeroRing inherits Rectangle {
     in property <float> fade: Theme.page-a;
     width: 176px;
     height: 176px;
-    property <float> spin: 0;
-    property <angle> a0: root.spin * 360deg;
     property <float> full: root.mode == 2 ? 1 : 0;
     property <float> arc: root.mode == 1 ? 1 : 0;
+    property <float> spin: root.arc > 0.01 ? mod(animation-tick() / 1200ms, 1) : 0;
+    property <angle> a0: root.spin * 360deg;
     animate full { duration: 360ms; easing: ease-out; }
     animate arc { duration: 260ms; easing: ease-out; }
-
-    Timer {
-        interval: 33ms;
-        running: root.mode == 1;
-        triggered => {
-            root.spin = mod(root.spin + 0.0275, 1);
-        }
-    }
 
     Rectangle {
         width: 100%;
@@ -587,17 +602,34 @@ export component HeroRing inherits Rectangle {
     Image {
         width: 176px;
         height: 176px;
-        source: Theme.dark ? @image-url("art/ring-full-dark.png") : @image-url("art/ring-full.png");
+        source: @image-url("art/ring-full.png");
         opacity: root.full * root.fade;
-        visible: root.full > 0.01;
+        visible: root.full > 0.01 && Theme.night < 0.995;
     }
 
     Image {
         width: 176px;
         height: 176px;
-        source: Theme.dark ? @image-url("art/ring-arc-dark.png") : @image-url("art/ring-arc.png");
+        source: @image-url("art/ring-full-dark.png");
+        opacity: root.full * root.fade * Theme.night;
+        visible: root.full > 0.01 && Theme.night > 0.005;
+    }
+
+    Image {
+        width: 176px;
+        height: 176px;
+        source: @image-url("art/ring-arc.png");
         opacity: root.arc * root.fade;
-        visible: root.arc > 0.01;
+        visible: root.arc > 0.01 && Theme.night < 0.995;
+        transform-rotation: root.a0;
+    }
+
+    Image {
+        width: 176px;
+        height: 176px;
+        source: @image-url("art/ring-arc-dark.png");
+        opacity: root.arc * root.fade * Theme.night;
+        visible: root.arc > 0.01 && Theme.night > 0.005;
         transform-rotation: root.a0;
     }
 
@@ -638,10 +670,10 @@ export component SegTabs inherits Rectangle {
     property <length> gap: 2px;
     property <length> cell: root.names.length > 0 ? (root.width - 2 * root.pad - root.gap * (root.names.length - 1)) / root.names.length : 0px;
     property <bool> thumb-pressed: false;
-    property <float> press: root.thumb-pressed ? 0.72 : 1;
-    animate press { duration: 110ms; }
+    property <float> press: root.thumb-pressed ? 0.88 : 1;
+    animate press { duration: Theme.calm ? 0ms : 90ms; }
     property <float> pos: root.current;
-    animate pos { duration: 320ms; easing: spring(0.1); }
+    animate pos { duration: Theme.calm ? 0ms : 240ms; easing: spring(0); }
     in property <float> fade: Theme.page-a;
     height: 38px;
     border-radius: 19px;
@@ -655,8 +687,11 @@ export component SegTabs inherits Rectangle {
         width: root.cell;
         height: root.height - 2 * root.pad;
         border-radius: 16px;
-        background: Theme.nav-active;
+        background: root.thumb-pressed ? Theme.press : Theme.nav-active;
+        animate background { duration: Theme.calm ? 0ms : 100ms; }
         opacity: root.press * root.fade;
+        transform-scale: root.thumb-pressed ? 0.97 : 1.0;
+        animate transform-scale { duration: Theme.calm ? 0ms : 90ms; easing: ease-out; }
     }
 
     for n[i] in root.names: Rectangle {
@@ -667,8 +702,10 @@ export component SegTabs inherits Rectangle {
         Rectangle {
             border-radius: 16px;
             opacity: root.fade;
-            background: i == root.current ? transparent : (seg-ta.pressed ? Theme.hover : (seg-ta.has-hover ? Theme.hover : transparent));
-            animate background { duration: 140ms; }
+            background: i == root.current ? transparent : (seg-ta.pressed ? Theme.press : (seg-ta.has-hover ? Theme.hover : transparent));
+            transform-scale: seg-ta.pressed ? 0.94 : 1.0;
+            animate background { duration: Theme.calm ? 0ms : (seg-ta.pressed ? 60ms : 150ms); }
+            animate transform-scale { duration: Theme.calm ? 0ms : 90ms; easing: ease-out; }
         }
         Text {
             text: n;
@@ -679,7 +716,7 @@ export component SegTabs inherits Rectangle {
             horizontal-alignment: center;
             vertical-alignment: center;
             overflow: elide;
-            animate color { duration: Theme.calm ? 0ms : 180ms; }
+            animate color { duration: Theme.calm ? 0ms : 160ms; }
         }
         seg-ta := TouchArea {
             mouse-cursor: pointer;
@@ -756,13 +793,18 @@ export component SearchBox inherits Rectangle {
         }
         if root.text != "": Rectangle {
             width: 18px;
+            border-radius: 9px;
+            background: clear-ta.pressed ? Theme.press : clear-ta.has-hover ? Theme.hover : transparent;
+            transform-scale: clear-ta.pressed ? 0.88 : 1.0;
+            animate background { duration: Theme.calm ? 0ms : 100ms; }
+            animate transform-scale { duration: Theme.calm ? 0ms : 90ms; easing: ease-out; }
             Icon {
                 kind: "x";
                 size: 13px;
-                colorize: Theme.text-dim;
+                colorize: clear-ta.has-hover ? Theme.text : Theme.text-dim;
                 opacity: root.fade;
             }
-            TouchArea {
+            clear-ta := TouchArea {
                 mouse-cursor: pointer;
                 clicked => {
                     root.text = "";

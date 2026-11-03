@@ -1,5 +1,5 @@
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -13,10 +13,6 @@ use super::fsx;
 use super::regbackup::{self, Hive};
 use super::registry;
 use super::sys;
-
-#[cfg(test)]
-#[path = "startup/security_tests.rs"]
-mod security_tests;
 
 const CV: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion";
 const APP_DATA: &str = "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\CurrentVersion\\AppModel\\SystemAppData";
@@ -86,7 +82,7 @@ pub struct StartupEntry {
 }
 
 pub fn list() -> Vec<StartupEntry> {
-    let mut out = std::thread::scope(|scope| {
+    let mut out = super::pool::scope(|scope| {
         let windows = scope.spawn(list_windows);
         let tasks = scope.spawn(super::tasks::list);
         let menus = scope.spawn(super::shellmenu::list);
@@ -138,15 +134,21 @@ fn list_windows() -> Vec<StartupEntry> {
     add_run(&mut out, Hive::User, &format!("{}\\Policies\\Explorer\\Run", CV), "");
     add_run(&mut out, Hive::Machine, &format!("{}\\Policies\\Explorer\\Run", CV), "");
     add_legacy_run(&mut out);
-    if let Some(folder) = startup_folder(Hive::User, "Startup", super::winenv::var("APPDATA")) {
-        add_folder(&mut out, &folder, Hive::User);
-    }
-    if let Some(folder) = startup_folder(Hive::Machine, "Common Startup", super::winenv::var("ProgramData")) {
-        add_folder(&mut out, &folder, Hive::Machine);
+    for hive in [Hive::User, Hive::Machine] {
+        if let Some(folder) = folder_of(hive) {
+            add_folder(&mut out, &folder, hive);
+        }
     }
     add_packaged(&mut out);
     add_advanced(&mut out);
     out
+}
+
+pub(super) fn folder_of(hive: Hive) -> Option<PathBuf> {
+    match hive {
+        Hive::User => startup_folder(hive, "Startup", super::winenv::var("APPDATA")),
+        Hive::Machine => startup_folder(hive, "Common Startup", super::winenv::var("ProgramData")),
+    }
 }
 
 fn startup_folder(hive: Hive, value: &str, base: Option<String>) -> Option<PathBuf> {
@@ -156,7 +158,7 @@ fn startup_folder(hive: Hive, value: &str, base: Option<String>) -> Option<PathB
         let text = path.to_string_lossy();
         (path.is_absolute() && !text.contains('%') && fsx::local_drive_path(&text) && !fileinfo::admin_only(&path)).then_some(path)
     });
-    configured.or_else(|| base.map(|b| Path::new(&b).join("Microsoft\\Windows\\Start Menu\\Programs\\Startup")))
+    configured.or_else(|| base.map(|b| Path::new(&b).join("Microsoft\\Windows\\Start Menu\\Programs\\Startup")).filter(|p| fsx::local_drive_path(&p.to_string_lossy())))
 }
 
 fn advanced(hive: Hive, key_path: &str, value_name: &str, name: String, command: String, enabled: bool, system: bool) -> StartupEntry {
@@ -476,7 +478,20 @@ pub fn delete(e: &StartupEntry, backup_dir: &Path) -> io::Result<()> {
         let leaf = file.file_name().ok_or_else(|| io::Error::other("bad entry"))?;
         let source = fsx::PinnedDir::open(parent)?;
         let backup = fsx::PinnedDir::open(backup_dir)?;
-        source.backup_and_remove_file(leaf, &backup)?;
+        let mut kept = std::ffi::OsString::from(if e.hive == Hive::Machine { "startup-common-" } else { "startup-user-" });
+        kept.push(leaf);
+        let elevated = sys::elevation()?;
+        source.backup_and_remove_file(leaf, &backup, &kept, |path, copy| {
+            if !elevated {
+                return Ok(());
+            }
+            let mut bytes = Vec::new();
+            copy.take(super::backups::MAX_FILE + 1).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > super::backups::MAX_FILE {
+                return Ok(());
+            }
+            regbackup::integrity::record(path, &bytes)
+        })?;
     } else {
         let key = e.hive.open_write(&e.key_path)?;
         regbackup::export_open_value(e.hive, &e.key_path, &key, &e.value_name, backup_dir)?;

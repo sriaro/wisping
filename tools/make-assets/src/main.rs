@@ -206,7 +206,9 @@ fn shadow_pixmap(spec: &ShadowSpec) -> (Pixmap, u32, u32) {
         for x in 0..size {
             let v = blurred[map(y) * big + map(x)];
             let level = if v > 0.002 { v * 255.0 + noise() - noise() } else { 0.0 };
-            data[((y * size + x) * 4 + 3) as usize] = level.round().clamp(0.0, 255.0) as u8;
+            let px = level.round().clamp(0.0, 255.0) as u8;
+            let i = ((y * size + x) * 4) as usize;
+            data[i..i + 4].copy_from_slice(&[px, px, px, px]);
         }
     }
     (out, slice, reach)

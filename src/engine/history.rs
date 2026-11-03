@@ -24,7 +24,7 @@ pub fn record(kind: &str, a: u64, b: u64, c: u64) {
     let s = sys::now_local();
     let line = format!("{:04}-{:02}-{:02} {:02}:{:02}\t{}\t{}\t{}\t{}\n", s.year, s.month, s.day, s.hour, s.minute, kind, a, b, c);
     data::ensure_root();
-    let _ = fsx::PinnedDir::create(data::root()).and_then(|dir| dir.append_lines("history.txt".as_ref(), &line, KEPT));
+    let _ = fsx::PinnedDir::create(&data::root()).and_then(|dir| dir.append_lines("history.txt".as_ref(), &line, KEPT));
 }
 
 pub fn parse(line: &str) -> Option<Entry> {
@@ -52,9 +52,9 @@ pub fn list() -> Vec<Entry> {
 }
 
 pub fn total_freed() -> u64 {
-    all().iter().filter(|e| e.kind == "clean").map(|e| e.a).sum()
+    all().iter().filter(|e| e.kind == "clean").fold(0, |total, e| total.saturating_add(e.a))
 }
 
 pub fn clear() {
-    let _ = fsx::PinnedDir::open(data::root()).and_then(|dir| dir.remove_file("history.txt".as_ref()));
+    let _ = fsx::PinnedDir::open(&data::root()).and_then(|dir| dir.remove_file("history.txt".as_ref()));
 }

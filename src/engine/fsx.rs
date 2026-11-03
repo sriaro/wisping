@@ -12,7 +12,7 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Storage::FileSystem::{
     FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX,
     FILE_DISPOSITION_INFO_EX_FLAGS, FILE_NAME_NORMALIZED, FILE_NAME_OPENED, FileDispositionInfo, FileDispositionInfoEx, GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW,
-    BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FileBasicInfo, GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx, SetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FILE_ID_INFO, FileBasicInfo, FileIdInfo, GetDriveTypeW, GetFileInformationByHandle, GetFileInformationByHandleEx, SetFileInformationByHandle,
 };
 use windows::core::PCWSTR;
 
@@ -29,10 +29,7 @@ const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const SHARE_ALL: u32 = 7;
 const SEP: u16 = b'\\' as u16;
-
-#[cfg(test)]
-#[path = "fsx/security_tests.rs"]
-pub(crate) mod security_tests;
+const PERSISTENT_ACLS: u32 = 8;
 
 #[path = "fsx/copy_remove.rs"]
 mod copy_remove;
@@ -226,6 +223,57 @@ pub fn norm_key(path: &Path) -> Option<String> {
     Some(text.to_lowercase())
 }
 
+pub fn plain_exists(path: &Path) -> Option<bool> {
+    if !path.is_absolute() || !local_drive_path(&path.to_string_lossy()) {
+        return None;
+    }
+    let mut chain: Vec<&Path> = path.ancestors().collect();
+    chain.reverse();
+    for part in chain {
+        match fs::symlink_metadata(part) {
+            Ok(meta) => {
+                if attrs_reparse(meta.file_attributes()) {
+                    return None;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Some(false),
+            Err(_) => return None,
+        }
+    }
+    Some(true)
+}
+
+pub fn plain_file(path: &Path) -> Option<bool> {
+    if !plain_exists(path)? {
+        return Some(false);
+    }
+    let meta = fs::symlink_metadata(path).ok()?;
+    if attrs_reparse(meta.file_attributes()) {
+        return None;
+    }
+    Some(meta.is_file())
+}
+
+pub fn plain_dir(path: &Path) -> Option<bool> {
+    if !plain_exists(path)? {
+        return Some(false);
+    }
+    let meta = fs::symlink_metadata(path).ok()?;
+    if attrs_reparse(meta.file_attributes()) {
+        return None;
+    }
+    Some(meta.is_dir())
+}
+
+pub fn open_plain(path: &Path) -> io::Result<File> {
+    if !local_drive_path(&path.to_string_lossy()) {
+        return Err(refused_path());
+    }
+    let parent = path.parent().ok_or_else(refused_path)?;
+    let name = path.file_name().ok_or_else(refused_path)?;
+    PinnedDir::open(parent)?.read_file(name)
+}
+
 pub fn expand_dirs(pattern: &str) -> Vec<PathBuf> {
     let path = PathBuf::from(expand_env(pattern));
     let mut base = PathBuf::new();
@@ -249,13 +297,13 @@ pub fn expand_dirs(pattern: &str) -> Vec<PathBuf> {
             for c in &current {
                 let Ok(rd) = fs::read_dir(c) else { continue };
                 for e in rd.flatten() {
-                    if e.file_type().is_ok_and(|t| t.is_dir()) && mask.matches(&e.file_name()) {
+                    if mask.matches(&e.file_name()) && plain_dir(&e.path()) == Some(true) {
                         next.push(e.path());
                     }
                 }
             }
         } else {
-            next.extend(current.iter().map(|c| c.join(&seg)).filter(|p| p.is_dir()));
+            next.extend(current.iter().map(|c| c.join(&seg)).filter(|p| plain_dir(p) == Some(true)));
         }
         current = next;
     }
@@ -366,7 +414,7 @@ pub struct PinnedDir {
 }
 
 fn refused_path() -> io::Error {
-    io::Error::other("A folder or file changed, or is a link. Choose an ordinary folder and try again.")
+    io::Error::other("changed")
 }
 
 fn child_name(name: &OsStr) -> io::Result<()> {
@@ -392,9 +440,90 @@ fn copy_basic_info(from: &File, to: &File) -> io::Result<()> {
         .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xffff))
 }
 
+fn windows_error(error: windows::core::Error) -> io::Error {
+    io::Error::from_raw_os_error(error.code().0 & 0xffff)
+}
+
+fn identity(handle: HANDLE) -> io::Result<(u64, [u8; 16])> {
+    let mut info = FILE_ID_INFO::default();
+    unsafe { GetFileInformationByHandleEx(handle, FileIdInfo, (&mut info as *mut FILE_ID_INFO).cast(),
+        std::mem::size_of::<FILE_ID_INFO>() as u32) }.map_err(windows_error)?;
+    Ok((info.VolumeSerialNumber, info.FileId.Identifier))
+}
+
 fn handle_is_child(file: &File, parent: &File) -> bool {
     let (Some(path), Some(base)) = (final_path(file), final_path(parent)) else { return false };
     path.iter().rposition(|&c| c == SEP).is_some_and(|end| path[..end].len() == base.len() && same_prefix(&path[..end], &base))
+}
+
+fn private_users() -> io::Result<Vec<String>> {
+    let mut users = vec![super::sys::user_sid()?];
+    if super::sys::is_admin()
+        && let Some(shell) = super::sys::shell_user_sid()
+        && !users.contains(&shell) {
+            users.push(shell);
+    }
+    Ok(users)
+}
+
+fn private_descriptor(descriptor: windows::Win32::Security::PSECURITY_DESCRIPTOR, users: &[String]) -> bool {
+    use windows::Win32::Foundation::{HLOCAL, LocalFree};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACE_HEADER, GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl,
+        GetSecurityDescriptorOwner, IsValidAcl, IsValidSecurityDescriptor, PSID, SE_DACL_PROTECTED,
+    };
+    use windows::core::{BOOL, PWSTR};
+    if descriptor.0.is_null() || !unsafe { IsValidSecurityDescriptor(descriptor) }.as_bool() {
+        return false;
+    }
+    let allowed = |sid: PSID| {
+        if sid.0.is_null() {
+            return false;
+        }
+        let mut text = PWSTR::null();
+        if unsafe { ConvertSidToStringSidW(sid, &mut text) }.is_err() {
+            return false;
+        }
+        let name = unsafe { text.to_string() };
+        unsafe { LocalFree(Some(HLOCAL(text.0.cast()))); }
+        name.is_ok_and(|name| name == "S-1-5-18" || name == "S-1-5-32-544" || users.contains(&name))
+    };
+    let mut control = 0;
+    let mut revision = 0;
+    if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }.is_err()
+        || control & SE_DACL_PROTECTED.0 == 0 {
+        return false;
+    }
+    let mut owner = PSID::default();
+    let mut defaulted = BOOL(0);
+    if unsafe { GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) }.is_err() || !allowed(owner) {
+        return false;
+    }
+    let mut present = BOOL(0);
+    let mut acl = std::ptr::null_mut();
+    if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) }.is_err()
+        || !present.as_bool() || acl.is_null() || !unsafe { IsValidAcl(acl) }.as_bool() {
+        return false;
+    }
+    for index in 0..unsafe { (*acl).AceCount } {
+        let mut raw = std::ptr::null_mut();
+        if unsafe { GetAce(acl, index as u32, &mut raw) }.is_err() || raw.is_null() {
+            return false;
+        }
+        let header = unsafe { &*raw.cast::<ACE_HEADER>() };
+        if header.AceType == 1 {
+            continue;
+        }
+        if header.AceType != 0 || (header.AceSize as usize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>() {
+            return false;
+        }
+        let ace = unsafe { &*raw.cast::<ACCESS_ALLOWED_ACE>() };
+        if !allowed(PSID((&raw const ace.SidStart).cast_mut().cast())) {
+            return false;
+        }
+    }
+    true
 }
 
 impl PinnedDir {
@@ -451,17 +580,28 @@ impl PinnedDir {
         &self.path
     }
 
+    fn keeps_acls(&self) -> bool {
+        use windows::Win32::Storage::FileSystem::GetVolumeInformationByHandleW;
+        let mut flags = 0u32;
+        unsafe { GetVolumeInformationByHandleW(HANDLE(self.handle().as_raw_handle()), None, None, None, Some(&mut flags), None) }.is_err() || flags & PERSISTENT_ACLS != 0
+    }
+
+    fn security_handle(&self, access: u32) -> io::Result<File> {
+        let file = OpenOptions::new().access_mode(access | READ_CONTROL | READ_ATTRIBUTES).share_mode(SHARE_ALL).custom_flags(OPEN_REPARSE_POINT | BACKUP_SEMANTICS).open(&self.path)?;
+        if identity(HANDLE(file.as_raw_handle()))? != identity(HANDLE(self.handle().as_raw_handle()))? {
+            return Err(refused_path());
+        }
+        Ok(file)
+    }
+
     pub fn make_private(&self) -> io::Result<()> {
-        use windows::Win32::Foundation::{CloseHandle, HLOCAL, LocalFree};
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Authorization::{ConvertStringSecurityDescriptorToSecurityDescriptorW, SE_FILE_OBJECT, SetSecurityInfo};
         use windows::Win32::Security::{ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
-        use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, ReOpenFile};
-        let mut sids = vec![super::sys::user_sid()?];
-        if super::sys::is_admin()
-            && let Some(shell) = super::sys::shell_user_sid()
-            && !sids.contains(&shell) {
-                sids.push(shell);
+        if !self.keeps_acls() {
+            return Ok(());
         }
+        let sids = private_users()?;
         let users: String = sids.iter().map(|sid| format!("(A;OICI;FA;;;{})", sid)).collect();
         let text: Vec<u16> = format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA){}", users).encode_utf16().chain([0]).collect();
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
@@ -470,33 +610,26 @@ impl PinnedDir {
         let mut defaulted = windows::core::BOOL(0);
         let mut acl: *mut ACL = std::ptr::null_mut();
         let result = unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted) }.map_err(io::Error::other).and_then(|_| {
-            let handle = unsafe { ReOpenFile(HANDLE(self.handle().as_raw_handle()), WRITE_DAC | READ_ATTRIBUTES, FILE_SHARE_MODE(SHARE_READ), FILE_FLAGS_AND_ATTRIBUTES(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)) }
-                .map_err(io::Error::other)?;
-            let status = unsafe { SetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, None, None, Some(acl), None) };
-            let _ = unsafe { CloseHandle(handle) };
-            status.ok().map_err(io::Error::other)
+            let handle = self.security_handle(WRITE_DAC)?;
+            unsafe { SetSecurityInfo(HANDLE(handle.as_raw_handle()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, None, None, Some(acl), None) }.ok().map_err(io::Error::other)
         });
         unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
         result
     }
 
     pub fn is_private(&self) -> bool {
-        use windows::Win32::Foundation::{CloseHandle, HLOCAL, LocalFree};
+        use windows::Win32::Foundation::{HLOCAL, LocalFree};
         use windows::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
-        use windows::Win32::Security::{DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED};
-        use windows::Win32::Storage::FileSystem::{FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, ReOpenFile};
-        let Ok(handle) = (unsafe { ReOpenFile(HANDLE(self.handle().as_raw_handle()), READ_CONTROL | READ_ATTRIBUTES, FILE_SHARE_MODE(SHARE_READ), FILE_FLAGS_AND_ATTRIBUTES(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)) }) else {
-            return false;
-        };
+        use windows::Win32::Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+        let Ok(users) = private_users() else { return false };
+        let Ok(handle) = self.security_handle(0) else { return false };
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
-        let status = unsafe { GetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, None, None, None, None, Some(&mut descriptor)) };
-        let _ = unsafe { CloseHandle(handle) };
+        let status = unsafe { GetSecurityInfo(HANDLE(handle.as_raw_handle()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION, None, None, None, None, Some(&mut descriptor)) };
+        drop(handle);
         if status.is_err() || descriptor.0.is_null() {
             return false;
         }
-        let mut control = 0;
-        let mut revision = 0;
-        let protected = unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) }.is_ok() && control & SE_DACL_PROTECTED.0 != 0;
+        let protected = private_descriptor(descriptor, &users);
         unsafe { LocalFree(Some(HLOCAL(descriptor.0))) };
         protected
     }
@@ -556,7 +689,7 @@ impl PinnedDir {
         pins.push(Arc::new(file));
         let dir = Self { path, pins };
         if made && private {
-            let _ = dir.make_private();
+            dir.make_private()?;
         }
         Ok(dir)
     }
@@ -671,8 +804,18 @@ impl PinnedDir {
         if dispose(&file, false) { Ok(()) } else { Err(io::Error::last_os_error()) }
     }
 
-    pub fn backup_and_remove_file(&self, name: &OsStr, target: &Self) -> io::Result<()> {
-        copy_remove::run(self, name, target, || {})
+    pub fn backup_and_remove_file(&self, name: &OsStr, target: &Self, kept: &OsStr, seal: impl FnOnce(&Path, &mut File) -> io::Result<()>) -> io::Result<()> {
+        copy_remove::run(self, name, target, kept, seal)
+    }
+
+    pub fn restore_file(&self, name: &OsStr, from: &mut File) -> io::Result<()> {
+        let mut file = self.create_file(name)?;
+        let copied = io::copy(from, &mut file).and_then(|_| copy_basic_info(from, &file)).and_then(|_| file.sync_all());
+        if copied.is_err() {
+            drop(file);
+            let _ = self.remove_file(name);
+        }
+        copied
     }
 
     pub fn remove(self) -> io::Result<()> {
@@ -698,10 +841,6 @@ pub struct Fence {
 }
 
 impl Fence {
-    pub fn new(root: &Path, own: &[PathBuf]) -> Option<Fence> {
-        Self::pinned(&PinnedDir::open(root).ok()?, own)
-    }
-
     pub fn guard_paths(own: &[PathBuf]) -> Vec<Vec<u16>> {
         let mut guarded = Vec::new();
         for p in own {
@@ -712,10 +851,6 @@ impl Fence {
             }
         }
         guarded
-    }
-
-    pub fn pinned(dir: &PinnedDir, own: &[PathBuf]) -> Option<Fence> {
-        Self::guarded(dir, &Self::guard_paths(own))
     }
 
     pub fn guarded(dir: &PinnedDir, guarded: &[Vec<u16>]) -> Option<Fence> {

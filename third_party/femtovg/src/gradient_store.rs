@@ -6,65 +6,63 @@ use crate::{
     Color, ErrorKind, ImageFlags, ImageId, ImageInfo, ImageSource, Renderer,
 };
 
-/// `GradientStore` holds image ids for multi-stop gradients. The actual image/textures
-/// are contained by the Canvas's `ImageStore`.
-//
-// If many gradients are used in a frame, we could combine them into a single texture
-// and update the texture immediately prior to giving the renderer the command list.
+const IDLE_FLUSHES_BEFORE_RELEASE: u8 = 2;
+const SPARE_TEXTURES: usize = 16;
+
 #[derive(Debug)]
 pub struct GradientStore {
-    this_frame: BTreeMap<MultiStopGradient, ImageId>,
-    prev_frame: BTreeMap<MultiStopGradient, ImageId>,
+    gradients: BTreeMap<MultiStopGradient, (ImageId, u8)>,
+    spare: Vec<ImageId>,
 }
 
 impl GradientStore {
-    /// Create a new empty gradient store
     pub fn new() -> Self {
         Self {
-            this_frame: BTreeMap::new(),
-            prev_frame: BTreeMap::new(),
+            gradients: BTreeMap::new(),
+            spare: Vec::new(),
         }
     }
 
-    /// Lookup or add a multi-stop gradient in this gradient store.
     pub fn lookup_or_add<R: Renderer>(
         &mut self,
         colors: &MultiStopGradient,
         images: &mut ImageStore<R::Image>,
         renderer: &mut R,
     ) -> Result<ImageId, ErrorKind> {
-        if let Some(gradient_image_id) = self.prev_frame.remove(colors) {
-            // See if we already have this texture from the previous frame. If we find
-            // it then we migrate it to the current frame so we don't release it and
-            // return the texture id to the caller.
-            self.this_frame.insert(colors.clone(), gradient_image_id);
-            Ok(gradient_image_id)
-        } else if let Some(gradient_image_id) = self.this_frame.get(colors) {
-            // See if we already used this gradient in this frame, and return the texture
-            // id if we do.
-            Ok(*gradient_image_id)
-        } else {
-            // We need to allocate a texture and synthesize the gradient image.
-            let info = ImageInfo::new(ImageFlags::REPEAT_Y, 256, 1, crate::PixelFormat::Rgba8);
-            let gradient_image_id = images.alloc(renderer, info)?;
-            let image = linear_gradient_stops(colors);
-            images.update(renderer, gradient_image_id, ImageSource::Rgba(image.as_ref()), 0, 0)?;
-
-            self.this_frame.insert(colors.clone(), gradient_image_id);
-            Ok(gradient_image_id)
+        if let Some((gradient_image_id, idle_flushes)) = self.gradients.get_mut(colors) {
+            *idle_flushes = 0;
+            return Ok(*gradient_image_id);
         }
+        let image = linear_gradient_stops(colors);
+        let gradient_image_id = match self.spare.pop() {
+            Some(gradient_image_id) => gradient_image_id,
+            None => {
+                let info = ImageInfo::new(ImageFlags::REPEAT_Y, 256, 1, crate::PixelFormat::Rgba8);
+                images.alloc(renderer, info)?
+            }
+        };
+        if let Err(error) = images.update(renderer, gradient_image_id, ImageSource::Rgba(image.as_ref()), 0, 0) {
+            images.remove(renderer, gradient_image_id);
+            return Err(error);
+        }
+        self.gradients.insert(colors.clone(), (gradient_image_id, 0));
+        Ok(gradient_image_id)
     }
 
-    /// Release the textures that were not used in the most recently rendered frame. This
-    /// method should be called when all the commands have been submitted.
     pub fn release_old_gradients<R: Renderer>(&mut self, images: &mut ImageStore<R::Image>, renderer: &mut R) {
-        let mut prev_textures = BTreeMap::new();
-        std::mem::swap(&mut prev_textures, &mut self.prev_frame);
-        for (_, gradient_image_id) in prev_textures {
-            images.remove(renderer, gradient_image_id);
-        }
-        // Move the "this_frame" textures to "prev_frame". "prev_frame" is already empty.
-        std::mem::swap(&mut self.this_frame, &mut self.prev_frame);
+        let spare = &mut self.spare;
+        self.gradients.retain(|_, (gradient_image_id, idle_flushes)| {
+            *idle_flushes += 1;
+            if *idle_flushes <= IDLE_FLUSHES_BEFORE_RELEASE {
+                return true;
+            }
+            if spare.len() < SPARE_TEXTURES {
+                spare.push(*gradient_image_id);
+            } else {
+                images.remove(renderer, *gradient_image_id);
+            }
+            false
+        });
     }
 }
 
@@ -95,12 +93,6 @@ fn gradient_span(dest: &mut [rgb::RGBA8; 256], color0: Color, color1: Color, off
 
     #[allow(clippy::needless_range_loop)]
     for i in s..e {
-        // The output must be premultiplied, but we don't premultiply until this point
-        // so that we can do gradients from transparent colors correctly -- for example
-        // if we have a stop that is fully transparent red and it transitions to opaque
-        // blue, we should see some red in the gradient. If we premultiply the stops
-        // then we won't see any red, because we will have already multiplied it to zero.
-        // This way we'll get the red contribution.
         dest[i] = rgb::RGBA8::new(
             (r * a * 255.0) as u8,
             (g * a * 255.0) as u8,
@@ -116,7 +108,6 @@ fn gradient_span(dest: &mut [rgb::RGBA8; 256], color0: Color, color1: Color, off
 fn linear_gradient_stops(gradient: &MultiStopGradient) -> imgref::Img<Vec<rgb::RGBA8>> {
     let mut dest = [rgb::RGBA8::new(0, 0, 0, 0); 256];
 
-    // Fill the gradient up to the first stop.
     let first_stop = gradient.get(0);
     if first_stop.0 > 0.0 {
         let s0 = first_stop.0;
@@ -124,20 +115,13 @@ fn linear_gradient_stops(gradient: &MultiStopGradient) -> imgref::Img<Vec<rgb::R
         gradient_span(&mut dest, color0, color0, 0.0, s0);
     }
 
-    // Iterate over the stops in overlapping pairs and fill out the rest of the
-    // gradient. If the stop position is > 1.0 then we have exhausted the stops
-    // and should break. As a special case, if the second stop is > 1.0 then we
-    // fill the current color to the end of the gradient.
     for [GradientStop(s0, color0), GradientStop(s1, color1)] in gradient.pairs() {
-        // Catch the case where the last stop doesn't go all the way to 1.0 and
-        // pad it.
         if s0 < 1.0 && s1 > 1.0 {
             gradient_span(&mut dest, color0, color0, s0, 1.0);
         } else {
             gradient_span(&mut dest, color0, color1, s0, s1);
         }
 
-        // If the first stop is >1.0 then we're done.
         if s0 > 1.0 {
             break;
         }

@@ -13,7 +13,7 @@ const KEEP: usize = 20;
 
 pub fn write_clean(lines: &[Line]) -> Option<PathBuf> {
     let s = sys::now_local();
-    let directory = fsx::PinnedDir::create_private(data::root()).and_then(|root| root.private_child("reports".as_ref())).ok()?;
+    let directory = fsx::PinnedDir::create_private(&data::root()).and_then(|root| root.private_child("reports".as_ref())).ok()?;
     let name = format!("clean-{}.txt", sys::stamp_name());
     let path = directory.path().join(&name);
     let mut out = String::new();

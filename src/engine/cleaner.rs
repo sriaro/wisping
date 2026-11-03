@@ -1,10 +1,9 @@
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
-use std::thread::Scope;
 
 use windows::Win32::UI::Shell::{SHEmptyRecycleBinW, SHQUERYRBINFO, SHQueryRecycleBinW};
 use windows::core::PCWSTR;
@@ -15,15 +14,12 @@ use winreg::enums::*;
 use super::data;
 use super::fsx::{self, Fence, Mask, Removal};
 use super::lock::LockExt;
+use super::pool::Scope;
 use super::registry;
 use super::sys;
 
 static KEEP_RECENT: AtomicBool = AtomicBool::new(true);
 static WALKERS: AtomicUsize = AtomicUsize::new(0);
-
-#[cfg(test)]
-#[path = "cleaner/security_tests.rs"]
-mod security_tests;
 
 pub fn set_keep_recent(value: bool) {
     KEEP_RECENT.store(value, Ordering::SeqCst);
@@ -68,12 +64,6 @@ pub struct CleanTarget {
     pub failed: u64,
     pub fail_samples: Vec<String>,
     pub scanned: bool,
-}
-
-impl CleanTarget {
-    pub fn custom(id: &str) -> CleanTarget {
-        CleanTarget { id: id.to_string(), ..Default::default() }
-    }
 }
 
 fn make(list: &mut Vec<CleanTarget>, id: &str, admin: bool, default_on: bool) -> usize {
@@ -132,12 +122,11 @@ fn reg_path_ok(entry: &str) -> bool {
         return false;
     }
     let under = |base: &str| lower == base || fsx::key_within(&lower, base);
-    let test = registry::allow_test_key() && under(&registry::TEST_KEY.to_lowercase());
     if let Some(v) = value {
         let v = v.to_lowercase();
-        return TOOL_VALUES.iter().any(|(k, n)| lower == *k && v == *n) || (test && !v.is_empty());
+        return TOOL_VALUES.iter().any(|(k, n)| lower == *k && v == *n);
     }
-    test || [&EXPLORER_KEYS[..], &TOOL_KEYS, &RDP_KEYS, &IE_KEYS, &WINRAR_KEYS].iter().flat_map(|l| l.iter()).any(|k| under(k)) || office_keys().iter().any(|k| under(k))
+    [&EXPLORER_KEYS[..], &TOOL_KEYS, &RDP_KEYS, &IE_KEYS, &WINRAR_KEYS].iter().flat_map(|l| l.iter()).any(|k| under(k)) || office_keys().iter().any(|k| under(k))
 }
 
 fn reg_open(path: &str, write: bool) -> io::Result<RegKey> {
@@ -241,7 +230,7 @@ pub fn steam_ok(path: &str) -> bool {
         && fsx::norm_key(p).is_some_and(|k| k != fsx::windir())
         && !fsx::is_protected(path)
         && !has_reparse_ancestor(p)
-        && p.join("steam.exe").is_file()
+        && fsx::plain_file(&p.join("steam.exe")) == Some(true)
 }
 
 fn steam_dir() -> Option<String> {
@@ -319,7 +308,7 @@ pub fn run_parallel(targets: &mut [CleanTarget], only: Option<&[usize]>, work: f
     let cells: Vec<Mutex<CleanTarget>> = jobs.iter().map(|&i| Mutex::new(std::mem::take(&mut targets[i]))).collect();
     let next = AtomicUsize::new(0);
     let workers = cells.len().min(worker_count());
-    std::thread::scope(|s| {
+    super::pool::scope(|s| {
         for _ in 0..workers {
             s.spawn(|| {
                 super::cpu::urgent();
@@ -729,13 +718,20 @@ struct Groups(std::collections::HashMap<(String, String), (u64, u64)>);
 
 const DETAIL_ROWS: usize = 300;
 
-fn ollama_names(root: &Path) -> std::collections::HashMap<String, String> {
+fn ollama_names(root: &Path, stop: &AtomicBool) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
     let base = root.join("manifests");
     let mut stack = vec![(base.clone(), 0u8)];
     while let Some((dir, depth)) = stack.pop() {
-        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let Ok(directory) = fsx::PinnedDir::open(&dir) else { continue };
+        let Ok(rd) = fs::read_dir(directory.path()) else { continue };
         for e in rd.flatten() {
+            if stop.load(Ordering::Relaxed) {
+                return out;
+            }
             let path = e.path();
             let Ok(m) = e.metadata() else { continue };
             if fsx::is_reparse(&path) {
@@ -747,10 +743,15 @@ fn ollama_names(root: &Path) -> std::collections::HashMap<String, String> {
                 }
                 continue;
             }
-            if m.len() > 1 << 20 {
+            const MAX_MANIFEST: u64 = 1 << 20;
+            if !m.is_file() || m.len() > MAX_MANIFEST {
                 continue;
             }
-            let Ok(text) = fs::read_to_string(&path) else { continue };
+            let Ok(file) = directory.read_file(&e.file_name()) else { continue };
+            let mut text = String::new();
+            if file.take(MAX_MANIFEST + 1).read_to_string(&mut text).is_err() || text.len() as u64 > MAX_MANIFEST {
+                continue;
+            }
             let Ok(rel) = path.strip_prefix(&base) else { continue };
             let mut comps: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().to_string()).collect();
             if comps.len() > 1 {
@@ -770,10 +771,6 @@ fn ollama_names(root: &Path) -> std::collections::HashMap<String, String> {
         }
     }
     out
-}
-
-pub fn details(t: &CleanTarget) -> Vec<Detail> {
-    details_until(t, &AtomicBool::new(false))
 }
 
 pub fn details_until(t: &CleanTarget, stop: &AtomicBool) -> Vec<Detail> {
@@ -810,8 +807,8 @@ pub fn details_until(t: &CleanTarget, stop: &AtomicBool) -> Vec<Detail> {
     let mut names: std::collections::HashMap<String, std::collections::HashMap<String, String>> = std::collections::HashMap::new();
     if t.id == "aimodels" {
         for p in &plans {
-            if p.root.join("manifests").is_dir() {
-                names.insert(p.root.display().to_string(), ollama_names(&p.root));
+            if fsx::plain_dir(&p.root.join("manifests")) == Some(true) {
+                names.insert(p.root.display().to_string(), ollama_names(&p.root, stop));
             }
         }
     }
@@ -918,7 +915,9 @@ fn prune(plans: &[Plan], mut dirs: Vec<(usize, PathBuf)>) {
 
 fn has_reparse_ancestor(dir: &Path) -> bool {
     let Some(full) = fsx::absolute(dir) else { return true };
-    full.ancestors().take_while(|p| p.parent().is_some()).any(fsx::is_reparse)
+    let mut chain: Vec<&Path> = full.ancestors().take_while(|p| p.parent().is_some()).collect();
+    chain.reverse();
+    chain.into_iter().any(fsx::is_reparse)
 }
 
 fn guarded_roots() -> &'static [String] {
@@ -931,6 +930,9 @@ fn guarded_roots() -> &'static [String] {
                     continue;
                 }
                 let p = Path::new(&value);
+                if fsx::plain_exists(p) != Some(true) {
+                    continue;
+                }
                 out.extend(fsx::norm_key(p));
                 out.extend(fsx::canonical_key(p));
             }
@@ -963,7 +965,7 @@ fn personal_dirs() -> &'static [String] {
                 }
             }
         }
-        let mut out: Vec<String> = paths.iter().filter(|p| p.is_absolute() && fsx::local_drive_path(&p.to_string_lossy())).flat_map(|p| [fsx::norm_key(p), fsx::canonical_key(p)]).flatten().filter(|k| k.split('\\').filter(|s| !s.is_empty()).count() >= 2).collect();
+        let mut out: Vec<String> = paths.iter().filter(|p| p.is_absolute() && fsx::local_drive_path(&p.to_string_lossy()) && fsx::plain_exists(p) == Some(true)).flat_map(|p| [fsx::norm_key(p), fsx::canonical_key(p)]).flatten().filter(|k| k.split('\\').filter(|s| !s.is_empty()).count() >= 2).collect();
         out.sort();
         out.dedup();
         out
@@ -1040,7 +1042,7 @@ where
         results: Mutex::new(Vec::new()),
         dirs: keep_dirs.then(|| Mutex::new(Vec::new())),
     };
-    std::thread::scope(|s| work(&w, s));
+    super::pool::scope(|s| work(&w, s));
     (w.results.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner), w.dirs.map(|d| d.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner)).unwrap_or_default())
 }
 

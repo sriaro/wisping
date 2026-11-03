@@ -56,8 +56,8 @@ fn start_label(key: &RegKey, start: u32) -> &'static str {
     }
 }
 
-fn entry(name: &str) -> Option<StartupEntry> {
-    let key = Hive::Machine.open(&format!("{}\\{}", SERVICES, name)).ok()?;
+fn entry(root: &RegKey, name: &str) -> Option<StartupEntry> {
+    let key = registry::target::open_child(root, name, KEY_READ | KEY_WOW64_64KEY).ok()?;
     let kind = regbackup::read_dword(&key, "Type")?;
     if kind & 0x30 == 0 {
         return None;
@@ -88,7 +88,7 @@ fn entry(name: &str) -> Option<StartupEntry> {
 pub fn list() -> Vec<StartupEntry> {
     let Ok(root) = Hive::Machine.open(SERVICES) else { return Vec::new() };
     let names: Vec<String> = root.enum_keys().flatten().collect();
-    sys::par_map(&names, |name| entry(name))
+    sys::par_map_with(&names, super::cpu::registry_threads(), || Hive::Machine.open(SERVICES).ok(), |root, name| entry(root, name))
 }
 
 fn valid_name(name: &str) -> bool {
@@ -106,7 +106,7 @@ fn read_state() -> Vec<(String, u32)> {
 
 fn write_state(items: &[(String, u32)]) -> io::Result<()> {
     if items.is_empty() {
-        return match fsx::PinnedDir::open(data::root()).and_then(|dir| dir.remove_file(STATE_FILE.as_ref())) {
+        return match fsx::PinnedDir::open(&data::root()).and_then(|dir| dir.remove_file(STATE_FILE.as_ref())) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         };
@@ -151,7 +151,7 @@ pub fn set_enabled(e: &mut StartupEntry, enable: bool) -> io::Result<()> {
     let target = if enable {
         saved_start(&e.value_name).unwrap_or(DEFAULT_ENABLED_START)
     } else {
-        save_start(&e.value_name, current).map_err(|err| io::Error::other(format!("could not save the current start type: {}", err)))?;
+        save_start(&e.value_name, current).map_err(|_| io::Error::other("nostarttype"))?;
         4
     };
     key.set_value("Start", &target)?;
@@ -173,7 +173,10 @@ pub fn delete(e: &StartupEntry, backup_dir: &Path) -> io::Result<()> {
     regbackup::export_key(Hive::Machine, &path, backup_dir)?;
     let out = sys::hidden("sc.exe").arg("delete").arg(&e.value_name).output()?;
     if !out.status.success() {
-        return Err(io::Error::other(sys::command_failure(&out.stdout, out.status.code())));
+        return Err(match out.status.code() {
+            Some(code) if code > 0 => io::Error::from_raw_os_error(code),
+            _ => sys::command_failure(&out.stdout),
+        });
     }
     data::log(&format!("service deleted {}", e.value_name));
     Ok(())

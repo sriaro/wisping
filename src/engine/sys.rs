@@ -40,15 +40,24 @@ pub fn oem_text(bytes: &[u8]) -> String {
     String::from_utf16_lossy(&wide[..got.max(0) as usize]).trim().to_string()
 }
 
-pub fn command_failure(output: &[u8], code: Option<i32>) -> String {
+#[derive(Debug)]
+pub struct Reported(pub String);
+
+impl std::fmt::Display for Reported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Reported {}
+
+pub fn command_failure(output: &[u8]) -> std::io::Error {
     let text = oem_text(output);
-    if !text.is_empty() {
-        return text;
+    let text = text.strip_prefix("ERROR:").map_or(text.as_str(), str::trim_start);
+    if text.is_empty() {
+        return std::io::Error::other("toolfailed");
     }
-    match code {
-        Some(c) => format!("failed (exit code {})", c),
-        None => "failed".to_string(),
-    }
+    std::io::Error::other(Reported(text.to_string()))
 }
 
 fn token_elevated(token: HANDLE) -> std::io::Result<bool> {
@@ -185,24 +194,30 @@ pub fn shell_user_is_self() -> bool {
 }
 
 pub fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> Option<R> + Sync) -> Vec<R> {
-    let threads = super::cpu::io_threads().min(items.len() / 8 + 1);
+    par_map_with(items, super::cpu::io_threads(), || Some(()), |_, item| f(item))
+}
+
+pub fn par_map_with<T: Sync, R: Send, S>(items: &[T], threads: usize, open: impl Fn() -> Option<S> + Sync, f: impl Fn(&S, &T) -> Option<R> + Sync) -> Vec<R> {
+    let threads = threads.min(items.len() / 8 + 1);
     if threads <= 1 {
-        return items.iter().filter_map(&f).collect();
+        let Some(state) = open() else { return Vec::new() };
+        return items.iter().filter_map(|item| f(&state, item)).collect();
     }
     let next = AtomicUsize::new(0);
     let chunk = (items.len() / (threads * 4)).max(1);
-    let mut parts: Vec<(usize, Vec<R>)> = std::thread::scope(|s| {
+    let mut parts: Vec<(usize, Vec<R>)> = super::pool::scope(|s| {
         let handles: Vec<_> = (0..threads)
             .map(|_| {
                 s.spawn(|| {
                     let mut done = Vec::new();
+                    let Some(state) = open() else { return done };
                     loop {
                         let start = next.fetch_add(chunk, Ordering::Relaxed);
                         if start >= items.len() {
                             break done;
                         }
                         let end = (start + chunk).min(items.len());
-                        done.push((start, items[start..end].iter().filter_map(&f).collect::<Vec<R>>()));
+                        done.push((start, items[start..end].iter().filter_map(|item| f(&state, item)).collect::<Vec<R>>()));
                     }
                 })
             })

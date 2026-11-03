@@ -9,6 +9,7 @@ use winreg::enums::*;
 use super::regbackup::{self, Hive};
 use super::registry;
 use super::sys;
+use super::fsx;
 
 const CV: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
 const CV_WOW: &str = "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
@@ -135,16 +136,20 @@ pub fn launch_uninstaller(p: &Program) -> io::Result<()> {
     if refused_elevated(p, sys::is_admin()) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, ELEVATED_USER_ENTRY));
     }
-    let (exe, args) = split_for(&p.command, p.user).ok_or_else(|| io::Error::other("The uninstall command is not a plain program path, so it was not started."))?;
-    if !std::path::Path::new(&exe).is_file() {
-        return Err(io::Error::other(format!("The uninstaller was not found: {}", exe)));
-    }
-    let dir = std::path::Path::new(&exe).parent().map(|d| HSTRING::from(d.as_os_str()));
+    let (exe, args) = split_for(&p.command, p.user).ok_or_else(|| io::Error::other("noplain"))?;
+    let exe_path = std::path::Path::new(&exe);
+    let parent = exe_path.parent().ok_or_else(|| io::Error::other("nouninstaller"))?;
+    let name = exe_path.file_name().ok_or_else(|| io::Error::other("nouninstaller"))?;
+    let dir_pin = fsx::PinnedDir::open(parent).map_err(|_| io::Error::other("nouninstaller"))?;
+    let file = dir_pin.read_file(name).map_err(|_| io::Error::other("nouninstaller"))?;
+    let dir = exe_path.parent().map(|d| HSTRING::from(d.as_os_str()));
     let params = HSTRING::from(args.as_str());
     let result = unsafe {
         ShellExecuteW(None, w!("open"), &HSTRING::from(exe.as_str()), if args.is_empty() { PCWSTR::null() } else { PCWSTR(params.as_ptr()) }, dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())), SW_SHOWNORMAL)
     };
-    if result.0 as isize > 32 { Ok(()) } else { Err(io::Error::other("Windows could not start the uninstaller.")) }
+    drop(file);
+    drop(dir_pin);
+    if result.0 as isize > 32 { Ok(()) } else { Err(io::Error::other("nostart")) }
 }
 
 pub fn install_dirs() -> Vec<(String, String)> {

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 
 use slint::{ComponentHandle, ModelRc, VecModel};
 
-use crate::app::{confirm, show_error, toast, Ctx};
+use crate::app::{confirm, error_text, show_error, toast, Ctx};
 use crate::engine::{backups, data, settings, sys};
 use crate::i18n;
 use crate::{BackupsState, DataItem, MainWindow};
@@ -30,7 +30,9 @@ fn backup_rows() -> Vec<DataItem> {
             }
             let mut r = row(&b.id, b.when, keys, "archive", 1);
             r.state = if b.files == 1 { i18n::get("backups.file.one") } else { i18n::fmt("backups.files", &[&b.files.to_string()]) }.into();
-            r.button = i18n::get("backups.restore").into();
+            if b.restorable {
+                r.button = i18n::get("backups.restore").into();
+            }
             r.deletable = true;
             r
         })
@@ -98,7 +100,7 @@ fn data_rows() -> Vec<DataItem> {
     open.button = i18n::get("backups.open.btn").into();
     let mut view = row("viewlog", i18n::get("backups.viewlog.title"), i18n::get("backups.viewlog.desc"), "file", 6);
     view.button = i18n::get("backups.open.btn").into();
-    view.enabled = data::log_path().is_file();
+    view.enabled = crate::engine::fsx::plain_file(&data::log_path()) == Some(true);
     if !view.enabled {
         view.desc = i18n::get("backups.viewlog.none").into();
     }
@@ -138,7 +140,7 @@ fn push(ui: &MainWindow) {
     }
     let generation = LIST_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     let weak = ui.as_weak();
-    std::thread::spawn(move || {
+    crate::engine::pool::spawn(move || {
         let items = backup_rows();
         let _ = weak.upgrade_in_event_loop(move |ui| {
             if LIST_GEN.load(Ordering::SeqCst) != generation {
@@ -166,10 +168,10 @@ fn show_items(st: &BackupsState, items: Vec<DataItem>, keep: bool) {
 }
 
 fn restore(c: &Ctx, id: String) {
-    in_background(c, move || backups::restore(&id).map(|_| i18n::get("backups.restored")).map_err(|e| e.to_string()));
+    in_background(c, true, move || backups::restore(&id).map(|_| i18n::get("backups.restored")).map_err(|e| error_text(&e)));
 }
 
-fn in_background(c: &Ctx, work: impl FnOnce() -> Result<String, String> + Send + 'static) {
+fn in_background(c: &Ctx, reload: bool, work: impl FnOnce() -> Result<String, String> + Send + 'static) {
     if BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
@@ -178,7 +180,7 @@ fn in_background(c: &Ctx, work: impl FnOnce() -> Result<String, String> + Send +
     }
     let weak = c.weak.clone();
     let core = c.core.clone();
-    std::thread::spawn(move || {
+    crate::engine::pool::spawn(move || {
         let _reset = crate::app::panic_reset(&weak, |ui| {
             BUSY.store(false, Ordering::SeqCst);
             ui.global::<BackupsState>().set_busy(false);
@@ -190,6 +192,9 @@ fn in_background(c: &Ctx, work: impl FnOnce() -> Result<String, String> + Send +
             crate::winui::trim_soon();
             ui.global::<BackupsState>().set_busy(false);
             let c = Ctx::new(ui.as_weak(), core);
+            if reload {
+                crate::app::reload_startups(&c, None);
+            }
             match result {
                 Ok(text) => toast(&c, text),
                 Err(e) => show_error(&c, e),
@@ -207,13 +212,13 @@ fn act(c: &Ctx, id: &str) {
     match id {
         "folder" => {
             if let Some(dir) = crate::winui::pick_folder() {
-                in_background(c, move || data::set_location(&dir).map(|()| i18n::get("backups.folder.moved")).map_err(|e| e.to_string()));
+                in_background(c, false, move || data::set_location(&dir).map(|()| i18n::get("backups.folder.moved")).map_err(|e| error_text(&e)));
             }
         }
-        "reset" => in_background(c, || data::reset_location().map(|()| i18n::get("backups.folder.reset")).map_err(|e| e.to_string())),
+        "reset" => in_background(c, false, || data::reset_location().map(|()| i18n::get("backups.folder.reset")).map_err(|e| error_text(&e))),
         "open" => {
             let dir = data::ensure_root();
-            open_path(dir);
+            open_path(&dir);
         }
         "clearhist" => {
             crate::engine::history::clear();
@@ -229,7 +234,16 @@ fn act(c: &Ctx, id: &str) {
                 i18n::get("backups.clear.btn"),
                 true,
                 Box::new(move || {
-                    in_background(&c2, || Ok(i18n::fmt("backups.deleted.many", &[&backups::delete_all().to_string()])));
+                    in_background(&c2, false, || {
+                        let report = backups::delete_all();
+                        if report.failed == 0 {
+                            Ok(i18n::fmt("backups.deleted.many", &[&report.removed.to_string()]))
+                        } else if report.needs_admin {
+                            Err(i18n::fmt("backups.deleted.admin", &[&report.removed.to_string(), &report.failed.to_string()]))
+                        } else {
+                            Err(i18n::fmt("backups.deleted.partial", &[&report.removed.to_string(), &report.failed.to_string()]))
+                        }
+                    });
                 }),
             );
         }
@@ -315,7 +329,7 @@ pub fn install(c: &Ctx) {
                 i18n::get("backups.delete.btn"),
                 true,
                 Box::new(move || {
-                    in_background(&c2, move || backups::delete(&owned).map(|()| i18n::get("backups.deleted")).map_err(|e| e.to_string()));
+                    in_background(&c2, false, move || backups::delete(&owned).map(|()| i18n::get("backups.deleted")).map_err(|e| error_text(&e)));
                 }),
             );
         }
@@ -324,10 +338,6 @@ pub fn install(c: &Ctx) {
         let c = c.clone();
         move |id| act(&c, id.as_str())
     });
-}
-
-pub fn preview(ui: &MainWindow) {
-    push(ui);
 }
 
 pub fn refresh(ui: &MainWindow) {

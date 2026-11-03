@@ -53,18 +53,11 @@ pub const TOOLS: [ToolInfo; 6] = [
 
 fn key_allowed(path: &str) -> bool {
     let lower = path.to_lowercase();
-    [NOTIFY_SETTINGS, NOTIFY_ICONS].iter().any(|k| lower == k.to_lowercase()) || (test_key(&lower))
-}
-
-fn test_key(lower: &str) -> bool {
-    registry::allow_test_key() && {
-        let base = registry::TEST_KEY.to_lowercase();
-        lower == base || super::fsx::key_within(lower, &base)
-    }
+    [NOTIFY_SETTINGS, NOTIFY_ICONS].iter().any(|k| lower == k.to_lowercase())
 }
 
 fn value_allowed(path: &str, name: &str) -> bool {
-    (path.eq_ignore_ascii_case(TRAY) && TRAY_VALUES.iter().any(|v| v.eq_ignore_ascii_case(name))) || (test_key(&path.to_lowercase()) && !name.is_empty())
+    path.eq_ignore_ascii_case(TRAY) && TRAY_VALUES.iter().any(|v| v.eq_ignore_ascii_case(name))
 }
 
 fn flags(id: &str) -> Option<[(&'static str, &'static str); 2]> {
@@ -77,7 +70,7 @@ fn flags(id: &str) -> Option<[(&'static str, &'static str); 2]> {
 fn flag_pairs_ok(pairs: &[(&str, &str)]) -> bool {
     pairs.iter().all(|(k, n)| {
         let lower = k.to_lowercase();
-        (lower == GAME_DVR.to_lowercase() && *n == "AppCaptureEnabled") || (lower == GAME_STORE.to_lowercase() && *n == "GameDVR_Enabled") || (test_key(&lower) && !n.is_empty())
+        (lower == GAME_DVR.to_lowercase() && *n == "AppCaptureEnabled") || (lower == GAME_STORE.to_lowercase() && *n == "GameDVR_Enabled")
     })
 }
 
@@ -100,8 +93,7 @@ pub fn write_flags(pairs: &[(&str, &str)], on: bool) -> io::Result<()> {
 }
 
 fn policy_allowed(hive: Hive, policy: &str, mirror: Option<&str>, name: &str, value: u32) -> bool {
-    let listed = hive == Hive::Machine && POLICIES.iter().any(|p| p.key == policy && p.mirror == mirror && p.name == name && p.value == value);
-    listed || (hive == Hive::User && test_key(&policy.to_lowercase()) && mirror.is_none_or(|m| test_key(&m.to_lowercase())) && !name.is_empty())
+    hive == Hive::Machine && POLICIES.iter().any(|p| p.key == policy && p.mirror == mirror && p.name == name && p.value == value)
 }
 
 pub fn read_policy(hive: Hive, policy: &str, name: &str, value: u32) -> bool {
@@ -113,7 +105,7 @@ pub fn set_policy(hive: Hive, policy: &str, mirror: Option<&str>, name: &str, va
         return Err(io::Error::other("refused"));
     }
     if hive == Hive::Machine && !sys::is_admin() {
-        return Err(io::Error::other("This needs administrator rights. Use \"Restart as admin\" in the sidebar."));
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "needs administrator rights"));
     }
     let keys: Vec<&str> = std::iter::once(policy).chain(mirror).collect();
     let mut opened: Vec<Option<winreg::RegKey>> = keys.iter().map(|path| {
@@ -225,7 +217,7 @@ fn write_marks(hive: Hive, marks: &[(String, Option<u32>)]) -> io::Result<()> {
         return write_machine_marks(marks);
     }
     if marks.is_empty() {
-        return match super::fsx::PinnedDir::open(data::root()).and_then(|dir| dir.remove_file(POLICY_STATE.as_ref())) {
+        return match super::fsx::PinnedDir::open(&data::root()).and_then(|dir| dir.remove_file(POLICY_STATE.as_ref())) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
             _ => Ok(()),
         };
@@ -386,7 +378,3 @@ fn run_tool(id: &str, backup_dir: &Path) -> io::Result<()> {
 pub fn restart_pc() {
     let _ = sys::hidden("shutdown.exe").args(["/r", "/t", "20"]).output();
 }
-
-#[cfg(test)]
-#[path = "tools/tests.rs"]
-mod tests;

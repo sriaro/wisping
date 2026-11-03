@@ -1,10 +1,6 @@
 use std::{collections::HashMap, mem, rc::Rc};
 
-#[cfg(not(target_arch = "wasm32"))]
 use std::ffi::c_void;
-
-#[cfg(all(feature = "glutin", not(target_arch = "wasm32")))]
-use glutin::display::GlDisplay;
 
 use fnv::FnvHashMap;
 use imgref::ImgVec;
@@ -32,18 +28,13 @@ use framebuffer::Framebuffer;
 mod uniform_array;
 use uniform_array::UniformArray;
 
-/// Represents an OpenGL renderer.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub struct OpenGl {
-    debug: bool,
     antialias: bool,
     is_opengles_2_0: bool,
     view: [f32; 2],
     screen_view: [f32; 2],
-    // All types of the vertex/fragment shader, indexed by shader_type when has_glyph_texture is true
     main_programs_with_glyph_texture: [Option<MainProgram>; 11],
-    // Same shader programs but with has_glyph_texture being false
     main_programs_without_glyph_texture: [Option<MainProgram>; 11],
     current_program: u8,
     current_program_needs_glyph_texture: bool,
@@ -56,12 +47,6 @@ pub struct OpenGl {
 }
 
 impl OpenGl {
-    /// Creates a new OpenGL renderer from a function loader.
-    ///
-    /// # Safety
-    /// This function is unsafe because it requires a function loader that can load OpenGL functions
-    /// and create a valid OpenGL context.
-    #[cfg(not(target_arch = "wasm32"))]
     pub unsafe fn new_from_function<F>(load_fn: F) -> Result<Self, ErrorKind>
     where
         F: FnMut(&str) -> *const c_void,
@@ -72,12 +57,6 @@ impl OpenGl {
         Self::new_from_context(context, is_opengles_2_0)
     }
 
-    /// Creates a new OpenGL renderer from a function loader that takes C-style strings.
-    ///
-    /// # Safety
-    /// This function is unsafe because it requires a function loader that can load OpenGL functions
-    /// and create a valid OpenGL context.
-    #[cfg(not(target_arch = "wasm32"))]
     pub unsafe fn new_from_function_cstr<F>(load_fn: F) -> Result<Self, ErrorKind>
     where
         F: FnMut(&std::ffi::CStr) -> *const c_void,
@@ -88,35 +67,7 @@ impl OpenGl {
         Self::new_from_context(context, is_opengles_2_0)
     }
 
-    /// Creates a new OpenGL renderer from a Glutin display.
-    #[cfg(all(feature = "glutin", not(target_arch = "wasm32")))]
-    pub fn new_from_glutin_display(display: &impl GlDisplay) -> Result<Self, ErrorKind> {
-        unsafe { OpenGl::new_from_function_cstr(|s| display.get_proc_address(s).cast()) }
-    }
-
-    /// Creates a new OpenGL renderer from an HTML canvas element in a WASM32 target.
-    #[cfg(target_arch = "wasm32")]
-    pub fn new_from_html_canvas(canvas: &web_sys::HtmlCanvasElement) -> Result<Self, ErrorKind> {
-        let attrs = web_sys::WebGlContextAttributes::new();
-        attrs.set_stencil(true);
-        attrs.set_antialias(false);
-
-        use wasm_bindgen::JsCast;
-        let webgl2_context = match canvas.get_context_with_context_options("webgl2", &attrs) {
-            Ok(Some(context)) => context.dyn_into::<web_sys::WebGl2RenderingContext>().unwrap(),
-            _ => {
-                return Err(ErrorKind::GeneralError(
-                    "Canvas::getContext failed to retrieve WebGL 2 context".to_owned(),
-                ))
-            }
-        };
-
-        let context = glow::Context::from_webgl2_context(webgl2_context);
-        Self::new_from_context(context, true)
-    }
-
     fn new_from_context(context: glow::Context, is_opengles_2_0: bool) -> Result<Self, ErrorKind> {
-        let debug = cfg!(debug_assertions);
         let antialias = true;
 
         let context = Rc::new(context);
@@ -136,7 +87,6 @@ impl OpenGl {
                     with_glyph_texture,
                 )?),
                 if with_glyph_texture {
-                    // No stencil fill with glyph texture
                     None
                 } else {
                     Some(MainProgram::new(&context, antialias, ShaderType::Stencil, false)?)
@@ -148,7 +98,6 @@ impl OpenGl {
                     with_glyph_texture,
                 )?),
                 if with_glyph_texture {
-                    // Image filter is unrelated to glyph rendering
                     None
                 } else {
                     Some(MainProgram::new(&context, antialias, ShaderType::FilterImage, false)?)
@@ -160,7 +109,6 @@ impl OpenGl {
                     with_glyph_texture,
                 )?),
                 if with_glyph_texture {
-                    // Texture blitting is unrelated to glyph rendering
                     None
                 } else {
                     Some(MainProgram::new(
@@ -184,7 +132,6 @@ impl OpenGl {
                     with_glyph_texture,
                 )?),
                 if with_glyph_texture {
-                    // Image filter is unrelated to glyph rendering
                     None
                 } else {
                     Some(MainProgram::new(
@@ -201,7 +148,6 @@ impl OpenGl {
         let main_programs_without_glyph_texture = generate_shader_program_variants(false)?;
 
         let mut opengl = Self {
-            debug,
             antialias,
             is_opengles_2_0: false,
             view: [0.0, 0.0],
@@ -228,32 +174,8 @@ impl OpenGl {
         Ok(opengl)
     }
 
-    /// Checks if the renderer is using OpenGL ES.
     pub fn is_opengles(&self) -> bool {
         self.is_opengles_2_0
-    }
-
-    fn check_error(&self, label: &str) {
-        if !self.debug {
-            return;
-        }
-
-        let err = unsafe { self.context.get_error() };
-
-        if err == glow::NO_ERROR {
-            return;
-        }
-
-        let message = match err {
-            glow::INVALID_ENUM => "Invalid enum",
-            glow::INVALID_VALUE => "Invalid value",
-            glow::INVALID_OPERATION => "Invalid operation",
-            glow::OUT_OF_MEMORY => "Out of memory",
-            glow::INVALID_FRAMEBUFFER_OPERATION => "Invalid framebuffer operation",
-            _ => "Unknown error",
-        };
-
-        log::error!("({err}) Error on {label} - {message}");
     }
 
     fn gl_factor(factor: BlendFactor) -> u32 {
@@ -300,8 +222,6 @@ impl OpenGl {
                 }
             }
         }
-
-        self.check_error("convex_fill");
     }
 
     fn concave_fill(
@@ -316,7 +236,6 @@ impl OpenGl {
             self.context.stencil_mask(0xff);
             self.context.stencil_func(glow::ALWAYS, 0, 0xff);
             self.context.color_mask(false, false, false, false);
-            //glow::DepthMask(glow::FALSE);
         }
 
         self.set_uniforms(images, stencil_paint, None, GlyphTexture::None);
@@ -339,9 +258,7 @@ impl OpenGl {
 
         unsafe {
             self.context.enable(glow::CULL_FACE);
-            // Draw anti-aliased pixels
             self.context.color_mask(true, true, true, true);
-            //glow::DepthMask(glow::TRUE);
         }
 
         self.set_uniforms(images, fill_paint, cmd.image, cmd.glyph_texture);
@@ -356,7 +273,6 @@ impl OpenGl {
                 self.context.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
             }
 
-            // draw fringes
             for drawable in &cmd.drawables {
                 if let Some((start, count)) = drawable.stroke_verts {
                     unsafe {
@@ -382,8 +298,6 @@ impl OpenGl {
 
             self.context.disable(glow::STENCIL_TEST);
         }
-
-        self.check_error("concave_fill");
     }
 
     fn stroke(&mut self, images: &ImageStore<GlTexture>, cmd: &Command, paint: &Params) {
@@ -397,8 +311,6 @@ impl OpenGl {
                 }
             }
         }
-
-        self.check_error("stroke");
     }
 
     fn stencil_stroke(&mut self, images: &ImageStore<GlTexture>, cmd: &Command, paint1: &Params, paint2: &Params) {
@@ -406,7 +318,6 @@ impl OpenGl {
             self.context.enable(glow::STENCIL_TEST);
             self.context.stencil_mask(0xff);
 
-            // Fill the stroke base without overlap
             self.context.stencil_func(glow::EQUAL, 0x0, 0xff);
             self.context.stencil_op(glow::KEEP, glow::KEEP, glow::INCR);
         }
@@ -422,7 +333,6 @@ impl OpenGl {
             }
         }
 
-        // Draw anti-aliased pixels.
         self.set_uniforms(images, paint1, cmd.image, cmd.glyph_texture);
 
         unsafe {
@@ -440,7 +350,6 @@ impl OpenGl {
         }
 
         unsafe {
-            // Clear stencil buffer.
             self.context.color_mask(false, false, false, false);
             self.context.stencil_func(glow::ALWAYS, 0x0, 0xff);
             self.context.stencil_op(glow::ZERO, glow::ZERO, glow::ZERO);
@@ -459,8 +368,6 @@ impl OpenGl {
             self.context.color_mask(true, true, true, true);
             self.context.disable(glow::STENCIL_TEST);
         }
-
-        self.check_error("stencil_stroke");
     }
 
     fn triangles(&mut self, images: &ImageStore<GlTexture>, cmd: &Command, paint: &Params) {
@@ -471,8 +378,6 @@ impl OpenGl {
                 self.context.draw_arrays(glow::TRIANGLES, start as i32, count as i32);
             }
         }
-
-        self.check_error("triangles");
     }
 
     fn set_uniforms(
@@ -485,7 +390,6 @@ impl OpenGl {
         self.select_main_program(paint);
         let arr = UniformArray::from(paint);
         self.main_program().set_config(arr.as_slice());
-        self.check_error("set_uniforms uniforms");
 
         let tex = image_tex.and_then(|id| images.get(id)).map(GlTexture::id);
         let is_external = image_tex
@@ -513,8 +417,6 @@ impl OpenGl {
             self.context.active_texture(glow::TEXTURE0 + 1);
             self.context.bind_texture(glow::TEXTURE_2D, glyphtex);
         }
-
-        self.check_error("set_uniforms texture");
     }
 
     fn clear_rect(&self, x: u32, y: u32, width: u32, height: u32, color: Color) {
@@ -570,13 +472,6 @@ impl OpenGl {
         }
     }
 
-    /// Make the "Screen" `RenderTarget` actually render to a framebuffer object. This is useful when
-    /// embedding femtovg into another program where final composition is handled by an external task.
-    /// The given `framebuffer_object` must refer to a Framebuffer Object created on the current OpenGL
-    /// Context, and must have a depth & stencil attachment.
-    ///
-    /// Pass `None` to clear any previous Framebuffer Object ID that was passed and target rendering to
-    /// the default target (normally the window).
     pub fn set_screen_target(&mut self, framebuffer_object: Option<<glow::Context as glow::HasContext>::Framebuffer>) {
         match framebuffer_object {
             Some(fbo_id) => self.screen_target = Some(Framebuffer::from_external(&self.context, fbo_id)),
@@ -627,10 +522,6 @@ impl OpenGl {
             0.,
         );
         params.shader_type = ShaderType::FilterImageColorMatrix;
-        // The color matrix rides the scissor/paint-matrix uniform slots, which are
-        // dead during a filter pass (no scissor, no paint gradient): frag[0..2]
-        // hold the first 12 values, frag[3..4] the last 8, so no uniform-array
-        // growth is needed. The shader reads them back as a row-major 4x5 matrix.
         params.scissor_mat.copy_from_slice(&matrix[..12]);
         params.paint_mat[..8].copy_from_slice(&matrix[12..20]);
 
@@ -657,9 +548,6 @@ impl OpenGl {
         sigma: f32,
     ) {
         let original_render_target = self.current_render_target;
-
-        // The filtering happens in two passes, first a horizontal blur and then the vertial blur. The
-        // first pass therefore renders into an intermediate, temporarily allocated texture.
 
         let source_image_info = images.get(cmd.image.unwrap()).unwrap().info();
 
@@ -694,8 +582,6 @@ impl OpenGl {
 
         blur_params.image_blur_filter_direction = [1.0, 0.0];
 
-        // GLES 2.0 does not allow non-constant loop indices, so limit the standard devitation to allow for a upper fixed limit
-        // on the number of iterations in the fragment shader.
         blur_params.image_blur_filter_sigma = sigma.min(8.);
 
         let horizontal_blur_buffer = images.alloc(self, source_image_info).unwrap();
@@ -731,7 +617,6 @@ impl OpenGl {
 
         images.remove(self, horizontal_blur_buffer);
 
-        // restore previous render target and view
         self.set_target(images, original_render_target);
         self.main_program().set_view(self.view);
     }
@@ -765,7 +650,6 @@ impl OpenGl {
 
             let program = self.main_program();
             program.bind();
-            // Bind the two uniform samplers to texture units
             program.set_tex(0);
             program.set_glyphtex(1);
             program.set_view(self.view);
@@ -804,7 +688,6 @@ impl Renderer for OpenGl {
     ) {
         self.current_program = 0;
         self.main_program().bind();
-        // Image reallocation may have invalidated the currently selected framebuffer.
         self.set_target(images, self.current_render_target);
         self.main_program().set_view(self.view);
 
@@ -847,8 +730,6 @@ impl Renderer for OpenGl {
                 2 * mem::size_of::<f32>() as i32,
             );
         }
-
-        self.check_error("render prepare");
 
         for cmd in commands {
             self.set_composite_operation(cmd.composite_operation);
@@ -895,8 +776,6 @@ impl Renderer for OpenGl {
         }
 
         self.main_program().unbind();
-
-        self.check_error("render done");
     }
 
     fn alloc_image(&mut self, info: ImageInfo) -> Result<Self::Image, ErrorKind> {
@@ -935,7 +814,6 @@ impl Renderer for OpenGl {
     }
 
     fn screenshot(&mut self) -> Result<ImgVec<RGBA8>, ErrorKind> {
-        //let mut image = image::RgbaImage::new(self.view[0] as u32, self.view[1] as u32);
         let w = self.view[0] as usize;
         let h = self.view[1] as usize;
 

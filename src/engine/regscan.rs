@@ -70,10 +70,9 @@ pub fn com(list: &mut Vec<RegIssue>) {
         let Ok(root) = hive.open(path) else { continue };
         let names: Vec<String> = root.enum_keys().flatten().filter(|n| is_guid(n)).collect();
         let wow = path.contains("WOW6432Node");
-        list.extend(sys::par_map(&names, |name| {
-            let full = format!("{}\\{}", path, name);
-            let clsid = hive.open(&full).ok()?;
-            broken_server(&clsid, wow).map(|p| RegIssue::new(hive, "com", &full, None, &p))
+        list.extend(sys::par_map_with(&names, super::cpu::registry_threads(), || hive.open(path).ok(), |root, name| {
+            let clsid = registry::target::open_child(root, name, KEY_READ | KEY_WOW64_64KEY).ok()?;
+            broken_server(&clsid, wow).map(|p| RegIssue::new(hive, "com", &format!("{}\\{}", path, name), None, &p))
         }));
     }
 }

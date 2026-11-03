@@ -137,10 +137,11 @@ export component UninstallPage inherits PageFrame {
         }
         Rectangle {
             vertical-stretch: 1;
-            if UninstallState.programs.length > 0: Rectangle {
-                for e in UninstallState.programs-epoch: vl := VirtualList {
-                    length: UninstallState.programs.length;
-                    row-height: 58px;
+            if UninstallState.programs.length > 0: vl := VirtualList {
+                reset: UninstallState.programs-epoch[0];
+                length: UninstallState.programs.length;
+                row-height: 58px;
+                for e in UninstallState.programs-epoch: Rectangle {
                     for k in vl.count: ProgRow {
                         y: (vl.first + k) * 58px;
                         order: k;

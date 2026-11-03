@@ -2,10 +2,7 @@
 /.App
 /data
 /Wisping.exe
-/Wisping-next.exe
-/_to-delete
 /tools/make-assets/target
 *.log
-/target-debug
 /wisping-location.txt
-/.wisping-write-test
+/.wisping-write-test-*

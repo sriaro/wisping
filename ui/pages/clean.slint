@@ -19,9 +19,11 @@ component CatRow inherits Rise {
         width: parent.width - 12px;
         height: parent.height - 6px;
         border-radius: 11px;
-        background: ta.has-hover && !root.item.locked ? Theme.hover : Theme.hover.transparentize(1);
+        background: !root.item.locked && ta.pressed ? Theme.press : (!root.item.locked && ta.has-hover ? Theme.hover : transparent);
         opacity: root.v;
-        animate background { duration: 140ms; }
+        transform-scale: !root.item.locked && ta.pressed ? 0.995 : 1.0;
+        animate background { duration: Theme.calm ? 0ms : (ta.pressed ? 70ms : 140ms); }
+        animate transform-scale { duration: Theme.calm ? 0ms : 100ms; easing: ease-out; }
     }
 
     if !root.last: Rectangle {

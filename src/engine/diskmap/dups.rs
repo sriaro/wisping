@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::AsRawHandle;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, FILE_FLAG_SEQUENTIAL_SCAN, GetFileInformationByHandle};
+use windows::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
 
 use crate::engine::lock::LockExt;
 use super::{Kind, Tree};
@@ -34,18 +34,19 @@ fn file_id(f: &File) -> Option<u128> {
     Some(((info.dwVolumeSerialNumber as u128) << 64) | ((info.nFileIndexHigh as u128) << 32) | info.nFileIndexLow as u128)
 }
 
-fn open(path: &std::path::Path) -> Option<File> {
-    let md = std::fs::symlink_metadata(path).ok()?;
-    if !md.is_file() || fsx::attrs_cloud(md.file_attributes()) {
+fn open(path: &std::path::Path, size: u64) -> Option<File> {
+    let file = fsx::open_plain(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() != size || fsx::attrs_cloud(metadata.file_attributes()) || fsx::attrs_reparse(metadata.file_attributes()) {
         return None;
     }
-    OpenOptions::new().read(true).share_mode(7).custom_flags(FILE_FLAG_SEQUENTIAL_SCAN.0).open(path).ok()
+    Some(file)
 }
 
 type Digest = [u8; 32];
 
 fn partial_hash(path: &std::path::Path, size: u64, buf: &mut [u8]) -> Option<(Digest, u128)> {
-    let mut f = open(path)?;
+    let mut f = open(path, size)?;
     let id = file_id(&f)?;
     let edge = &mut buf[..EDGE];
     let mut h = blake3::Hasher::new();
@@ -58,8 +59,11 @@ fn partial_hash(path: &std::path::Path, size: u64, buf: &mut [u8]) -> Option<(Di
     Some((*h.finalize().as_bytes(), id))
 }
 
-fn full_hash(path: &std::path::Path, cancel: &AtomicBool, buf: &mut [u8]) -> Option<Digest> {
-    let mut f = open(path)?;
+fn full_hash(path: &std::path::Path, size: u64, cancel: &AtomicBool, buf: &mut [u8]) -> Option<Digest> {
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    let mut f = open(path, size)?;
     let mut h = blake3::Hasher::new();
     loop {
         if cancel.load(Ordering::Relaxed) {
@@ -73,10 +77,13 @@ fn full_hash(path: &std::path::Path, cancel: &AtomicBool, buf: &mut [u8]) -> Opt
     }
 }
 
-fn split(tree: &Tree, ids: &[u32], mut hash: impl FnMut(&std::path::Path) -> Option<(Digest, u128)>) -> Vec<Vec<u32>> {
+fn split(tree: &Tree, ids: &[u32], cancel: &AtomicBool, mut hash: impl FnMut(&std::path::Path) -> Option<(Digest, u128)>) -> Vec<Vec<u32>> {
     let mut map: HashMap<Digest, Vec<u32>> = HashMap::new();
     let mut linked: HashSet<u128> = HashSet::new();
     for &id in ids {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         if let Some((h, file)) = hash(&tree.path_of(id))
             && (file == 0 || linked.insert(file)) {
                 map.entry(h).or_default().push(id);
@@ -88,16 +95,22 @@ fn split(tree: &Tree, ids: &[u32], mut hash: impl FnMut(&std::path::Path) -> Opt
 pub fn find(tree: &Tree, cancel: &AtomicBool) -> Vec<Group> {
     let mut by_size: HashMap<u64, Vec<u32>> = HashMap::new();
     for (i, n) in tree.nodes.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
         if n.kind == Kind::File && n.size >= MIN_SIZE {
             by_size.entry(n.size).or_default().push(i as u32);
         }
     }
     let mut candidates: Vec<(u64, Vec<u32>)> = by_size.into_iter().filter(|(_, v)| v.len() > 1).collect();
-    candidates.sort_by_key(|(s, v)| std::cmp::Reverse(s * v.len() as u64));
+    if candidates.is_empty() || cancel.load(Ordering::Relaxed) {
+        return Vec::new();
+    }
+    candidates.sort_by_key(|(s, v)| std::cmp::Reverse(s.saturating_mul(v.len() as u64)));
     let next = AtomicUsize::new(0);
     let out: Mutex<Vec<Group>> = Mutex::new(Vec::new());
     let workers = crate::engine::cpu::compute_threads().div_ceil(2).min(candidates.len().max(1));
-    std::thread::scope(|s| {
+    crate::engine::pool::scope(|s| {
         for _ in 0..workers {
             s.spawn(|| {
                 crate::engine::cpu::eco();
@@ -108,8 +121,8 @@ pub fn find(tree: &Tree, cancel: &AtomicBool) -> Vec<Group> {
                         break;
                     }
                     let (size, ids) = &candidates[k];
-                    for part in split(tree, ids, |p| partial_hash(p, *size, &mut buf)) {
-                        for same in split(tree, &part, |p| full_hash(p, cancel, &mut buf).map(|h| (h, 0))) {
+                    for part in split(tree, ids, cancel, |p| partial_hash(p, *size, &mut buf)) {
+                        for same in split(tree, &part, cancel, |p| full_hash(p, *size, cancel, &mut buf).map(|h| (h, 0))) {
                             out.locked().push(Group { size: *size, members: same });
                         }
                     }

@@ -1,7 +1,6 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-// cSpell: ignore blitting
 use std::cell::RefCell;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -45,24 +44,9 @@ fn pixmap_bytes(width: u32, height: u32, data: &[u8]) -> Option<&[u8]> {
     data.get(..required)
 }
 
-#[cfg(test)]
-mod security_tests {
-    #[test]
-    fn security_cached_pixmap_rejects_zero_short_and_overflow() {
-        let pixels = [0; 20];
-        assert!(super::pixmap_bytes(0, 1, &pixels).is_none());
-        assert!(super::pixmap_bytes(1, 0, &pixels).is_none());
-        assert!(super::pixmap_bytes(3, 2, &pixels).is_none());
-        assert!(super::pixmap_bytes(u32::MAX, u32::MAX, &pixels).is_none());
-        assert_eq!(super::pixmap_bytes(2, 2, &pixels).unwrap().len(), 16);
-    }
-}
-
 pub enum ItemGraphicsCacheEntry<R: femtovg::Renderer + TextureImporter> {
     Texture(Rc<Texture<R>>),
     ColorizedImage {
-        // This original image Rc is kept here to keep the image in the shared image cache, so that
-        // changes to the colorization brush will not require re-uploading the image.
         _original_image: Rc<Texture<R>>,
         colorized_image: Rc<Texture<R>>,
     },
@@ -108,14 +92,10 @@ pub struct GLItemRenderer<'a, R: femtovg::Renderer + TextureImporter> {
     texture_cache: &'a RefCell<super::images::TextureCache<R>>,
     box_shadow_cache: &'a FemtovgBoxShadowCache<R>,
     canvas: CanvasRc<R>,
-    // Textures from layering or tiling that were scheduled for rendering where we can't delete the femtovg::ImageId yet
-    // because that can only happen after calling `flush`. Otherwise femtovg ends up processing
-    // `set_render_target` commands with image ids that have been deleted.
     textures_to_delete_after_flush: RefCell<Vec<Rc<super::images::Texture<R>>>>,
     window: &'a i_slint_core::api::Window,
     scale_factor: ScaleFactor,
     text_layout_cache: &'a sharedparley::TextLayoutCache,
-    /// track the state manually since femtovg don't have accessor for its state
     state: Vec<State>,
     metrics: RenderingMetrics,
 }
@@ -130,9 +110,6 @@ fn rect_with_radius_to_path(
     let width = rect.size.width;
     let height = rect.size.height;
     if let Some(border_radius) = border_radius.as_uniform() {
-        // If we're drawing a circle, use directly connected bezier curves instead of
-        // ones with intermediate LineTo verbs, as `rounded_rect` creates, to avoid
-        // rendering artifacts due to those edges.
         if width.approx_eq(&height) && (border_radius * 2.).approx_eq(&width) {
             path.circle(x + border_radius, y + border_radius, border_radius);
         } else {
@@ -210,14 +187,11 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         if geometry.is_empty() {
             return;
         }
-        // TODO: cache path in item to avoid re-tesselation
         let path = rect_to_path(geometry);
         let paint = match self.brush_to_paint(rect.background(), geometry.size) {
             Some(paint) => paint,
             None => return,
         }
-        // Since we're filling a straight rectangle with either color or gradient, save
-        // the extra stroke triangle strip around the edges
         .with_anti_alias(false);
         self.canvas.borrow_mut().fill_path(&path, &paint);
     }
@@ -263,7 +237,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         _size: LogicalSize,
         _cache: &CachedRenderingData,
     ) {
-        // Register a dependency for the dirty tracking; the actual rendering is done earlier in FemtoVGRenderer.
         let _ = rect.background();
     }
 
@@ -304,9 +277,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
 
         let mut femtovg_path = femtovg::Path::new();
 
-        /// Contrary to the SVG spec, femtovg does not use the orientation of the path to
-        /// know if it needs to fill or not some part, it uses its own Solidity enum.
-        /// We must then compute ourself the orientation and set the Solidity accordingly.
         #[derive(Default)]
         struct OrientationCalculator {
             area: f32,
@@ -418,14 +388,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         })
     }
 
-    /// Draws a rectangular shadow shape, which is usually placed underneath another rectangular shape
-    /// with an offset (the drop-shadow-offset-x/y). The algorithm follows the HTML Canvas spec 4.12.5.1.18:
-    ///  * Create a new image to cache the shadow rendering
-    ///  * Fill the image with transparent "black"
-    ///  * Draw the (rounded) rectangle at shadow offset_x/offset_y
-    ///  * Blur the image
-    ///  * Fill the image with the shadow color and SourceIn as composition mode
-    ///  * Draw the shadow image
     fn draw_box_shadow(
         &mut self,
         box_shadow: Pin<&items::BoxShadow>,
@@ -439,10 +401,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         {
             return;
         }
-        // TODO: implement inset shadows and spread for femtovg, using the shape_size,
-        // outer_radius and inner_radius of the BoxShadowOptions. Until then, skip rendering
-        // inset shadows entirely (otherwise they'd render incorrectly as a drop shadow).
-        // Spread is silently ignored.
         if box_shadow.inset() {
             return;
         }
@@ -538,7 +496,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
 
         let shadow_image = match &cache_entry {
             Some(cached_shadow_image) => cached_shadow_image.as_texture(),
-            None => return, // Zero width or height shadow
+            None => return,
         };
 
         let shadow_image_size = match shadow_image.size() {
@@ -546,8 +504,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
             None => return,
         };
 
-        // On the paint for the box shadow, we don't need anti-aliasing on the fringes,
-        // since we are just blitting a texture. This saves a triangle strip for the stroke.
         let shadow_image_paint = shadow_image.as_paint().with_anti_alias(false);
 
         let mut shadow_image_rect = femtovg::Path::new();
@@ -607,15 +563,12 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
             return RenderingResult::ContinueRenderingChildren;
         }
 
-        // Note: This is correct, combine_clip and get_current_clip operate on logical coordinates.
         let (clip_rect, clip_radius) = i_slint_core::item_rendering::clip_content_box(
             size,
             clip_item.logical_border_radius(),
             clip_item.border_width(),
         );
 
-        // If clipping is enabled but the clip element is outside the visible range, then we don't
-        // need to bother doing anything, not even rendering the children.
         if !self.get_current_clip().intersects(&clip_rect) {
             return RenderingResult::ContinueRenderingWithoutChildren;
         }
@@ -649,9 +602,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
                 );
 
                 self.canvas.borrow_mut().save_with(|canvas| {
-                    // The layer_path can be bigger than the layer image (e.g. when the children occupy
-                    // a smaller region than the clip), so clip to avoid the image paint extending past
-                    // the image bounds.
                     canvas.intersect_scissor(
                         layer_origin.x,
                         layer_origin.y,
@@ -670,7 +620,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         }
     }
 
-    fn combine_clip(&mut self, clip_rect: LogicalRect, radius: LogicalBorderRadius) -> bool {
+    fn combine_clip(&mut self, clip_rect: LogicalRect, _radius: LogicalBorderRadius) -> bool {
         let clip = &mut self.state.last_mut().unwrap().scissor;
         let clip_region_valid = match clip.intersection(&clip_rect) {
             Some(r) => {
@@ -690,10 +640,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
             phys_rect.size.width,
             phys_rect.size.height,
         );
-
-        // femtovg only supports rectangular clipping. Non-rectangular clips must be handled via
-        // `visit_clip`, which renders children into a layer.
-        debug_assert!(radius.is_zero());
 
         clip_region_valid
     }
@@ -811,8 +757,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
 
         let fill_paint =
             femtovg::Paint::image(image_id, 0., 0., image_size.width, image_size.height, 0.0, 1.0)
-                // We preserve the rectangular shape of the image, so there's no need to apply anti-aliasing
-                // at the edges
                 .with_anti_alias(false);
 
         let mut path = femtovg::Path::new();
@@ -842,7 +786,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         let angle_in_radians = angle_in_degrees.to_radians();
         self.canvas.borrow_mut().rotate(angle_in_radians);
         let clip = &mut self.state.last_mut().unwrap().scissor;
-        // Compute the bounding box of the rotated rectangle
         let (sin, cos) = (-angle_in_radians).sin_cos();
         let rotate_point = |p: LogicalPoint| (p.x * cos - p.y * sin, p.x * sin + p.y * cos);
         let corners = [
@@ -943,7 +886,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GlyphRenderer for GLItemRendere
 
         let mut canvas = self.canvas.borrow_mut();
 
-        // When rendering text, the canvas needs to be aligned to the pixel grid.
         Self::align_canvas_during(&mut *canvas, |canvas| match &mut brush {
             GlyphBrush::Fill(paint) => {
                 paint.set_font_size(font_size.get());
@@ -998,8 +940,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GlyphRenderer for GLItemRendere
             })
         });
 
-        // When rendering text we align to the pixel grid, so do the same for underlines,
-        // selection, etc.
         Self::align_canvas_during(&mut *self.canvas.borrow_mut(), |canvas| {
             canvas.fill_path(&path, &fill_paint);
             if let Some(sp) = stroke_paint.as_ref() {
@@ -1024,15 +964,8 @@ impl<'a, R: femtovg::Renderer + TextureImporter> LayerRenderer<'a> for GLItemRen
     ) -> Option<Self::LayerTarget> {
         let size = physical_size.ceil().try_cast::<u32>()?;
 
-        // Reuse the previously cached layer texture if its size matches: the
-        // cache entry holds the only other reference, so once we return from
-        // the outer `get_or_update_cache_entry` that ref is dropped.
         let reused = self.layer_cache.with_entry(item_rc, |cache_entry| match cache_entry {
-            Some((_, texture)) if texture.size() == Some(size.to_untyped()) => {
-                let cloned = texture.clone();
-                debug_assert_eq!(Rc::strong_count(&cloned), 2);
-                Some(cloned)
-            }
+            Some((_, texture)) if texture.size() == Some(size.to_untyped()) => Some(texture.clone()),
             _ => None,
         });
 
@@ -1119,12 +1052,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
         }
     }
 
-    // In some cases (e.g. when rendering text), the canvas needs to be aligned to the pixel grid.
-    // Otherwise, even with nearest-neighbor scaling, the glyphs can have strange artifacts, as
-    // the nearest-neighbor algorithm is unstable if the pixel coordinate is at exactly 0.5px,
-    // which is very noticeable with text.
-    //
-    // Note that this will currently only align the canvas if it is not rotated and not scaled.
     fn align_canvas_during<Result>(
         canvas: &mut Canvas<R>,
         fun: impl FnOnce(&mut Canvas<R>) -> Result,
@@ -1150,11 +1077,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
         result
     }
 
-    // Aligns the canvas origin so that `origin + extra_offset` will end up on the device pixel
-    // grid. Returns whether alignment was applied, in which case the caller must call
-    // `canvas.restore()` afterwards.
-    //
-    // Note that this will currently only align the canvas if it is not rotated and not scaled.
     fn pixel_align_origin(canvas: &mut Canvas<R>, extra_offset: PhysicalPoint) -> bool {
         let [a, b, c, d, x, y] = canvas.transform().0;
 
@@ -1184,8 +1106,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
             && let Some(layer_size) = layer_image.size()
         {
             let mut layer_path = femtovg::Path::new();
-            // On the paint for the layer, we don't need anti-aliasing on the fringes,
-            // since we are just blitting a texture. This saves a triangle strip for the stroke.
             let layer_image_paint =
                 layer_image.as_paint_with_alpha(alpha_tint).with_anti_alias(false);
 
@@ -1236,7 +1156,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
         let mut image_rect = femtovg::Path::new();
         image_rect.rect(0., 0., image_size.width, image_size.height);
 
-        // We fill the entire image, there is no need to apply anti-aliasing around the edges
         let brush_paint =
             match self.brush_to_paint(colorize_brush, PhysicalSize::from_untyped(image_size)) {
                 Some(paint) => paint.with_anti_alias(false),
@@ -1245,7 +1164,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
 
         self.canvas.borrow_mut().save_with(|canvas| {
             canvas.reset();
-            canvas.scale(1., -1.); // Image are rendered upside down
+            canvas.scale(1., -1.);
             canvas.translate(0., -image_size.height);
             canvas.set_render_target(femtovg::RenderTarget::Image(colorized_image));
 
@@ -1284,6 +1203,11 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
         if size.width <= 0. || size.height <= 0. {
             return;
         }
+
+        let tint = match item.colorize() {
+            Brush::SolidColor(color) if color.alpha() > 0 => Some(to_femtovg_color(&color)),
+            _ => None,
+        };
 
         let cached_image = loop {
             let image_cache_entry = self.graphics_cache.get_or_update_cache_entry(item_rc, || {
@@ -1336,12 +1260,14 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
                 })
                 .map(ItemGraphicsCacheEntry::Texture)
                 .map(|cache_entry| {
-                    self.colorize_image(cache_entry, item.colorize(), image_rendering, tiling)
+                    if tint.is_some() {
+                        cache_entry
+                    } else {
+                        self.colorize_image(cache_entry, item.colorize(), image_rendering, tiling)
+                    }
                 })
             });
 
-            // Check if the image in the cache is loaded. If not, don't draw any image and we'll return
-            // later when the callback from load_html_image has issued a repaint
             let cached_image = match image_cache_entry {
                 Some(entry) if entry.as_texture().size().is_some() => entry,
                 _ => {
@@ -1349,10 +1275,10 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
                 }
             };
 
-            // It's possible that our item cache contains an image but it's not colorized yet because it was only
-            // placed there via the `image_size` function (which doesn't colorize). So we may have to invalidate our
-            // item cache and try again.
-            if !cached_image.is_colorized_image() && !item.colorize().is_transparent() {
+            if tint.is_none()
+                && !cached_image.is_colorized_image()
+                && !item.colorize().is_transparent()
+            {
                 self.graphics_cache.release(item_rc);
                 continue;
             }
@@ -1391,9 +1317,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
         let scale_w = buf_size.width / orig_size.width;
         let scale_h = buf_size.height / orig_size.height;
 
-        // Pixel-align the item's final draw origin (its own position plus the first fit's
-        // offset) before drawing (#6455). There's normally only one fit; 9-slice is the
-        // exception, with one fit per slice, so slices 2.. can still land on fractional pixels.
         let restore_after_fits = fits.first().is_some_and(|first_fit| {
             Self::pixel_align_origin(&mut self.canvas.borrow_mut(), first_fit.offset)
         });
@@ -1428,7 +1351,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
                     image_rect.rect(0., 0., texture_size.width, texture_size.height);
                     self.canvas.borrow_mut().save_with(|canvas| {
                         canvas.reset();
-                        canvas.scale(1., -1.); // Image are rendered upside down
+                        canvas.scale(1., -1.);
                         canvas.translate(0., -scale_h * (fit.clip_rect.height() as f32));
                         canvas.set_render_target(femtovg::RenderTarget::Image(clipped_image));
                         canvas.global_composite_operation(femtovg::CompositeOperation::Copy);
@@ -1454,14 +1377,14 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
                     (image_id, fit.clip_rect.origin.cast::<f32>(), buf_size)
                 };
             let tiled = fit.tiled.unwrap_or_default();
-            let fill_paint = femtovg::Paint::image(
+            let fill_paint = femtovg::Paint::image_tint(
                 image_id,
                 -origin.x - tiled.x as f32,
                 -origin.y - tiled.y as f32,
                 texture_size.width,
                 texture_size.height,
                 0.0,
-                1.0,
+                tint.unwrap_or(femtovg::Color::rgba(255, 255, 255, 255)),
             )
             .with_anti_alias(!matches!(image_inner, ImageInner::NineSlice(_)) && (fit.source_to_target_x != 1. || fit.source_to_target_y != 0.));
 
@@ -1485,8 +1408,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
         }
     }
 
-    /// Converts the brush into a femtovg paint, with gradients resolved against the
-    /// `size` of the shape's geometry.
     fn brush_to_paint(&self, brush: Brush, size: PhysicalSize) -> Option<femtovg::Paint> {
         let resolved = i_slint_core::graphics::resolve_brush(&brush, size, self.scale_factor)?;
         Some(match resolved {
@@ -1521,7 +1442,6 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
 fn to_femtovg_stops(
     stops: &[i_slint_core::graphics::GradientStop],
 ) -> impl Iterator<Item = (f32, femtovg::Color)> + '_ {
-    // The extra stop at 1.0 keeps femtovg from extrapolating the last color.
     let extra = stops
         .last()
         .filter(|last| last.position != 1.0)

@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use slint::ComponentHandle;
 
-use crate::app::{confirm, show_error, toast, Ctx};
+use crate::app::{confirm, error_text, show_error, toast, Ctx};
 use crate::engine::{data, tools};
 use crate::i18n;
 use crate::{MainWindow, ToolItem, ToolsState};
@@ -19,7 +19,7 @@ fn push(ui: &MainWindow) {
     let busy = BUSY.with(|b| b.borrow().clone());
     let admin = ui.global::<crate::AppState>().get_is_admin();
     let weak = ui.as_weak();
-    std::thread::spawn(move || {
+    crate::engine::pool::spawn(move || {
         let items = build(busy, admin);
         let _ = weak.upgrade_in_event_loop(move |ui| {
             let st = ui.global::<ToolsState>();
@@ -80,7 +80,7 @@ fn switch(c: &Ctx, id: &'static str, on: bool) {
     set_busy(c, Some(id));
     let weak = c.weak.clone();
     let core = c.core.clone();
-    std::thread::spawn(move || {
+    crate::engine::pool::spawn(move || {
         let _reset = crate::app::panic_reset(&weak, clear);
         let result = tools::set_on(id, on);
         let _ = weak.upgrade_in_event_loop(move |ui| {
@@ -88,7 +88,7 @@ fn switch(c: &Ctx, id: &'static str, on: bool) {
             set_busy(&c, None);
             match result {
                 Ok(()) => toast(&c, i18n::get(&format!("tools.{}.{}", id, if on { "on" } else { "off" }))),
-                Err(e) => show_error(&c, e.to_string()),
+                Err(e) => show_error(&c, error_text(&e)),
             }
         });
     });
@@ -105,7 +105,7 @@ fn finish(c: &Ctx, id: &str, result: std::io::Result<()>) {
             }));
         }
         Ok(()) => toast(c, i18n::get("tools.done")),
-        Err(e) => show_error(c, e.to_string()),
+        Err(e) => show_error(c, error_text(&e)),
     }
 }
 
@@ -116,7 +116,7 @@ fn start(c: &Ctx, id: &'static str) {
     set_busy(c, Some(id));
     let weak = c.weak.clone();
     let core = c.core.clone();
-    std::thread::spawn(move || {
+    crate::engine::pool::spawn(move || {
         let _reset = crate::app::panic_reset(&weak, clear);
         let result = data::new_backup_dir().and_then(|dir| tools::run(id, &dir));
         let _ = weak.upgrade_in_event_loop(move |ui| {
@@ -154,10 +154,6 @@ pub fn install(c: &Ctx) {
             confirm(&c, i18n::get(&format!("tools.{}.confirm.title", tid)), i18n::get(&format!("tools.{}.confirm.text", tid)), i18n::get("tools.btn"), true, Box::new(move || start(&c2, tid)));
         }
     });
-}
-
-pub fn preview(ui: &MainWindow) {
-    push(ui);
 }
 
 pub fn refresh(ui: &MainWindow) {

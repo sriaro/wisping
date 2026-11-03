@@ -1169,12 +1169,9 @@ dependencies = [
  "glow",
  "imgref",
  "itertools 0.15.0",
- "log",
  "rgb",
  "slotmap",
  "swash",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
@@ -1921,8 +1918,6 @@ dependencies = [
  "lyon_path",
  "pin-weak",
  "rgb",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
@@ -5647,7 +5642,6 @@ name = "wisping"
 version = "1.0.0"
 dependencies = [
  "blake3",
- "png",
  "slint",
  "slint-build",
  "windows",

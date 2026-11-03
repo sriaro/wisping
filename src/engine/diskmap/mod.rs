@@ -2,7 +2,8 @@ pub mod dups;
 pub mod owners;
 pub mod treemap;
 
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
@@ -171,16 +172,32 @@ impl Tree {
         (0..CATS).max_by_key(|&i| c[i]).unwrap_or(7)
     }
 
-    pub fn largest_files(&self, limit: usize) -> Vec<u32> {
-        let mut v: Vec<u32> = (1..self.nodes.len() as u32).filter(|&i| self.nodes[i as usize].kind == Kind::File).collect();
-        let k = limit.min(v.len());
-        if k == 0 {
-            return v;
+    pub fn largest_files(&self, limit: usize, cancel: &AtomicBool) -> Vec<u32> {
+        if limit == 0 {
+            return Vec::new();
         }
-        v.select_nth_unstable_by(k - 1, |a, b| self.nodes[*b as usize].size.cmp(&self.nodes[*a as usize].size));
-        v.truncate(k);
-        v.sort_unstable_by(|a, b| self.nodes[*b as usize].size.cmp(&self.nodes[*a as usize].size).then(a.cmp(b)));
-        v
+        let mut largest = BinaryHeap::with_capacity(limit);
+        for (i, node) in self.nodes.iter().enumerate().skip(1) {
+            if i.is_multiple_of(1024) && cancel.load(Ordering::Relaxed) {
+                return Vec::new();
+            }
+            if node.kind != Kind::File {
+                continue;
+            }
+            let candidate = (Reverse(node.size), i as u32);
+            if largest.len() < limit {
+                largest.push(candidate);
+            } else if let Some(mut smallest) = largest.peek_mut()
+                && candidate < *smallest {
+                    *smallest = candidate;
+                }
+        }
+        if cancel.load(Ordering::Relaxed) {
+            return Vec::new();
+        }
+        let mut result: Vec<u32> = largest.into_iter().map(|(_, i)| i).collect();
+        result.sort_unstable_by(|a, b| self.nodes[*b as usize].size.cmp(&self.nodes[*a as usize].size).then(a.cmp(b)));
+        result
     }
 }
 
@@ -229,6 +246,9 @@ fn list_dir(path: &Path, progress: &Progress, linked: &Mutex<HashSet<u128>>) -> 
     let mut l = Listing { text: String::new(), dirs: Vec::new(), big: Vec::new(), small_files: 0, small_bytes: 0 };
     let (mut files, mut bytes) = (0u64, 0u64);
     for entry in rd.flatten() {
+        if progress.cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let Ok(md) = entry.metadata() else { continue };
         if md.file_type().is_symlink() {
             continue;
@@ -334,7 +354,10 @@ fn work(sh: &Shared) {
     }
 }
 
-pub fn scan(root: &Path, progress: &Progress) -> Tree {
+pub fn scan(root: &Path, progress: &Progress) -> Option<Tree> {
+    if progress.cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     let mut names = Names::default();
     let root_name = root.to_string_lossy();
     let (off, len) = names.push(&root_name);
@@ -347,7 +370,7 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
         linked: Mutex::new(HashSet::new()),
     };
     let workers = (super::cleaner::worker_count() * 2).min(32);
-    std::thread::scope(|s| {
+    crate::engine::pool::scope(|s| {
         for _ in 0..workers {
             s.spawn(|| {
                 crate::engine::cpu::urgent();
@@ -355,11 +378,17 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
             });
         }
     });
+    if progress.cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     let (mut nodes, mut names) = sh.nodes.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
     nodes.shrink_to_fit();
     names.seal();
     let mut weight = vec![1u32; nodes.len()];
     for i in (1..nodes.len()).rev() {
+        if i.is_multiple_of(1024) && progress.cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let (parent, size, files) = (nodes[i].parent as usize, nodes[i].size, nodes[i].files);
         nodes[parent].size += size;
         nodes[parent].files += files;
@@ -367,6 +396,9 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
     }
     let mut big = 0u32;
     for (i, n) in nodes.iter_mut().enumerate() {
+        if i.is_multiple_of(1024) && progress.cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         n.cat = if n.kind == Kind::Dir && (i == 0 || weight[i] >= CAT_SPAN) {
             big += 1;
             big - 1
@@ -377,6 +409,9 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
     drop(weight);
     let mut dir_cats = vec![[0u64; CATS]; big as usize];
     for i in (0..nodes.len()).rev() {
+        if i.is_multiple_of(1024) && progress.cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let n = nodes[i];
         if n.cat == NONE {
             continue;
@@ -395,7 +430,7 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
         }
         dir_cats[n.cat as usize] = c;
     }
-    Tree { nodes, dir_cats, names, root: root.to_path_buf() }
+    (!progress.cancel.load(Ordering::Relaxed)).then_some(Tree { nodes, dir_cats, names, root: root.to_path_buf() })
 }
 
 fn add_cats(nodes: &[Node], names: &Names, idx: u32, c: &mut [u64; CATS]) {

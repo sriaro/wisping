@@ -10,10 +10,13 @@ use slint::{ComponentHandle, ModelRc, Timer, TimerMode, VecModel, Weak};
 
 use crate::engine::cleaner::{self, CleanTarget};
 use crate::engine::data;
+use crate::engine::fsx;
 use crate::engine::lock::LockExt;
+use crate::engine::pool;
 use crate::engine::regbackup::Hive;
 use crate::engine::registry::{self, RegIssue};
 use crate::engine::report;
+use crate::engine::settings;
 use crate::engine::startup::{self, StartupEntry};
 use crate::engine::sys;
 use crate::i18n;
@@ -172,10 +175,10 @@ fn start_scan(c: &Ctx, scope: Scope) {
     }
     let core = c.core.clone();
     let weak = c.weak.clone();
-    std::thread::spawn(move || {
+    pool::spawn(move || {
         let _reset = idle_on_panic(&weak);
-        let reg_job = (scope != Scope::Targets).then(|| std::thread::spawn(registry::run));
-        let start_job = (scope == Scope::All).then(|| std::thread::spawn(startup::list_cached));
+        let reg_job = (scope != Scope::Targets).then(|| pool::run(registry::run));
+        let start_job = (scope == Scope::All).then(|| pool::run(startup::list_cached));
         let mut failed = false;
         if scope != Scope::Registry {
             let mut targets = core.locked().targets.clone();
@@ -272,7 +275,7 @@ fn run_clean(c: &Ctx) {
     st.set_status(i18n::get("status.cleaning").into());
     let core = c.core.clone();
     let weak = c.weak.clone();
-    std::thread::spawn(move || {
+    pool::spawn(move || {
         let _reset = idle_on_panic(&weak);
         let (mut targets, admin) = {
             let g = core.locked();
@@ -335,12 +338,12 @@ fn run_fix(c: &Ctx) {
     st.set_status(i18n::get("status.fixing").into());
     let core = c.core.clone();
     let weak = c.weak.clone();
-    std::thread::spawn(move || {
+    pool::spawn(move || {
         let _reset = idle_on_panic(&weak);
         let backup = match data::new_backup_dir() {
             Ok(d) => d,
             Err(e) => {
-                let text = e.to_string();
+                let text = error_text(&e);
                 let _ = weak.upgrade_in_event_loop(move |ui| {
                     let st = ui.global::<AppState>();
                     st.set_busy(false);
@@ -375,9 +378,9 @@ fn run_fix(c: &Ctx) {
                 toast(&ctx(), i18n::fmt("toast.fixed", &[&fixed.to_string(), &total.to_string()]));
             } else {
                 let mut text = i18n::fmt("msg.errors", &[&errors.len().to_string()]);
-                for line in errors.iter().take(5) {
+                for (name, err) in errors.iter().take(5) {
                     text.push('\n');
-                    text.push_str(&ltr(line));
+                    text.push_str(&format!("{}: {}", ltr(name), error_text(err)));
                 }
                 show_error(&ctx(), text);
             }
@@ -385,16 +388,68 @@ fn run_fix(c: &Ctx) {
     });
 }
 
-fn start_error(err: &std::io::Error) -> String {
-    match err.to_string().as_str() {
-        "policy" => i18n::get("msg.policy"),
-        "system" => i18n::get("msg.system"),
-        "locked" => i18n::get("msg.locked"),
-        "nodisable" => i18n::get("msg.nodisable"),
-        "nodelete" => i18n::get("msg.nodelete"),
-        _ if err.kind() == std::io::ErrorKind::PermissionDenied => i18n::get("msg.needAdmin"),
-        other => other.to_string(),
-    }
+pub fn error_text(err: &std::io::Error) -> String {
+    let text = err.to_string();
+    let key = match text.as_str() {
+        "policy" => "msg.policy",
+        "system" => "msg.system",
+        "locked" => "msg.locked",
+        "nodisable" => "msg.nodisable",
+        "nodelete" => "msg.nodelete",
+        "readonly" => "msg.readonly",
+        "refused" => "msg.refused",
+        "skipped" => "msg.skipped",
+        "changed" => "msg.changed",
+        "reglink" => "msg.reglink",
+        "unprotected" => "msg.unprotected",
+        "gone" => "msg.gone",
+        "norestore" => "msg.norestore",
+        "unreadable" => "msg.unreadable",
+        "damaged" => "msg.damaged",
+        "unsealed" => "msg.unsealed",
+        "notask" => "msg.notask",
+        "nofolder" => "msg.nofolder",
+        "exists" => "msg.exists",
+        "unverifiable" => "msg.unverifiable",
+        "undeletable" => "msg.undeletable",
+        "nolocal" => "msg.nolocal",
+        "notfull" => "msg.notfull",
+        "badfolder" => "msg.badfolder",
+        "nested" => "msg.nested",
+        "nowrite" => "msg.nowrite",
+        "noplain" => "msg.noplain",
+        "nouninstaller" => "msg.nouninstaller",
+        "nostart" => "msg.nostart",
+        "the task did not change" => "msg.unchanged",
+        "the desktop shell is unavailable" => "msg.noshell",
+        "key missing" => "msg.keymissing",
+        "backup is too large" => "msg.toolarge",
+        "registry value cannot be backed up" | "registry value name is too long" | "unsupported value type" | "unexpected value type" => "msg.nobackup",
+        "could not create a backup folder" | "could not create a backup file" | "backup copy failed" => "msg.backupfailed",
+        "nostarttype" => "msg.nostarttype",
+        "toolfailed" => "msg.toolfailed",
+        "bad entry" | "bad task" | "bad key name" | "bad value name" | "bad dword" | "bad handler" | "unknown tool" => "msg.invalid",
+        _ if err.kind() == std::io::ErrorKind::PermissionDenied || err.raw_os_error() == Some(1314) => if sys::is_admin() { "msg.denied" } else { "msg.needAdmin" },
+        _ => match err.raw_os_error() {
+            Some(2 | 3 | 1018) => "msg.notfound",
+            Some(32 | 33) => "msg.inuse",
+            Some(39 | 112) => "msg.diskfull",
+            Some(19) => "msg.writeprotect",
+            Some(21) => "msg.notready",
+            Some(80 | 183) => "msg.taken",
+            Some(225 | 226) => "msg.virus",
+            Some(1223) => "msg.cancelled",
+            Some(code) => {
+                let detail = text.strip_suffix(&format!(" (os error {code})")).unwrap_or(&text);
+                return i18n::fmt("msg.oserror", &[&code.to_string(), detail]);
+            }
+            None => match err.get_ref().and_then(|e| e.downcast_ref::<sys::Reported>()) {
+                Some(reported) => return i18n::fmt("msg.reported", &[&reported.0]),
+                None => return text,
+            },
+        },
+    };
+    i18n::get(key)
 }
 
 fn same_start(a: &StartupEntry, b: &StartupEntry) -> bool {
@@ -412,7 +467,7 @@ fn toggle_start(c: &Ctx, i: usize, value: bool) {
     st.set_status(i18n::get("status.applying").into());
     let core = c.core.clone();
     let weak = c.weak.clone();
-    std::thread::spawn(move || {
+    pool::spawn(move || {
         let _reset = idle_on_panic(&weak);
         let result = startup::set_enabled(&mut entry, value);
         let _ = weak.upgrade_in_event_loop(move |ui| {
@@ -425,7 +480,7 @@ fn toggle_start(c: &Ctx, i: usize, value: bool) {
             push_home(&ui, &g);
             drop(g);
             if let Err(err) = result {
-                show_error(&ctx(), start_error(&err));
+                show_error(&ctx(), error_text(&err));
             }
         });
     });
@@ -453,7 +508,7 @@ fn delete_start(c: &Ctx, i: usize) {
             st.set_status(i18n::get("status.applying").into());
             let core = c2.core.clone();
             let weak = c2.weak.clone();
-            std::thread::spawn(move || {
+            pool::spawn(move || {
                 let _reset = idle_on_panic(&weak);
                 let outcome = data::new_backup_dir().and_then(|dir| {
                     let result = startup::delete(&entry, &dir);
@@ -476,7 +531,7 @@ fn delete_start(c: &Ctx, i: usize) {
                     drop(g);
                     match outcome {
                         Ok(()) => toast(&ctx(), i18n::get("toast.removed")),
-                        Err(e) => show_error(&ctx(), start_error(&e)),
+                        Err(e) => show_error(&ctx(), error_text(&e)),
                     }
                 });
             });
@@ -484,7 +539,7 @@ fn delete_start(c: &Ctx, i: usize) {
     );
 }
 
-fn reload_startups(c: &Ctx, done: Option<String>) {
+pub fn reload_startups(c: &Ctx, done: Option<String>) {
     let Some(ui) = c.weak.upgrade() else { return };
     let st = ui.global::<AppState>();
     let owns_busy = !st.get_busy();
@@ -494,7 +549,7 @@ fn reload_startups(c: &Ctx, done: Option<String>) {
     }
     let core = c.core.clone();
     let weak = c.weak.clone();
-    std::thread::spawn(move || {
+    pool::spawn(move || {
         let _reset = owns_busy.then(|| idle_on_panic(&weak));
         startup::invalidate_cache();
         let list = startup::list_cached();
@@ -516,8 +571,9 @@ fn reload_startups(c: &Ctx, done: Option<String>) {
 }
 
 pub fn detect_dark() -> bool {
-    if let Some(v) = data::read_setting("theme.txt") {
-        return v == "dark";
+    if settings::remember_on()
+        && let Some(v) = data::read_setting("theme.txt") {
+            return v == "dark";
     }
     match Hive::User.open("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize") {
         Ok(key) => crate::engine::regbackup::read_dword(&key, "AppsUseLightTheme") == Some(0),
@@ -534,7 +590,7 @@ fn preload_startups(c: &Ctx) {
     ui.global::<AppState>().set_startups_loading(true);
     let core = c.core.clone();
     let weak = c.weak.clone();
-    std::thread::spawn(move || {
+    pool::spawn(move || {
         let _reset = panic_reset(&weak, |ui| ui.global::<AppState>().set_startups_loading(false));
         let list = startup::list_cached();
         let _ = weak.upgrade_in_event_loop(move |ui| {
@@ -562,7 +618,7 @@ fn preload_drives(c: &Ctx) {
     }
     let core = c.core.clone();
     let weak = c.weak.clone();
-    std::thread::spawn(move || {
+    pool::spawn(move || {
         let _done = Done;
         crate::engine::drives::refresh();
         let _ = weak.upgrade_in_event_loop(move |ui| {
@@ -621,10 +677,6 @@ pub fn install_text(ui: &MainWindow) {
     apply_fonts(ui);
     let t = ui.global::<T>();
     t.on_t(|key, _| i18n::get(&key).into());
-    t.on_f(|key, a, b, c, _| {
-        let args: Vec<&str> = [a.as_str(), b.as_str(), c.as_str()].into_iter().collect();
-        i18n::fmt(&key, &args).into()
-    });
 }
 
 pub fn setup(ui: &MainWindow) {
@@ -634,6 +686,7 @@ pub fn setup(ui: &MainWindow) {
     install_text(ui);
     let dark = detect_dark();
     ui.global::<Theme>().set_dark(dark);
+    ui.global::<Theme>().set_night(if dark { 1.0 } else { 0.0 });
     let keep = data::read_setting("keep-recent.txt").map(|v| v != "all").unwrap_or(true);
     cleaner::set_keep_recent(keep);
     ui.global::<AppState>().set_keep_recent(keep);
@@ -760,7 +813,7 @@ pub fn setup(ui: &MainWindow) {
             if let Some(old) = DETAILS_STOP.locked().replace(stop.clone()) {
                 old.store(true, Ordering::Relaxed);
             }
-            std::thread::spawn(move || {
+            pool::spawn(move || {
                 let current = stop.clone();
                 let _reset = panic_reset(&weak, move |ui| {
                     if !current.load(Ordering::Relaxed) {
@@ -789,8 +842,8 @@ pub fn setup(ui: &MainWindow) {
             return;
         }
         let p = std::path::Path::new(path);
-        if p.is_absolute() && p.exists() {
-            crate::pages::disk::reveal(p, p.is_dir());
+        if fsx::local_drive_path(path) && fsx::plain_exists(p) == Some(true) {
+            crate::pages::disk::reveal(p, fsx::plain_dir(p) == Some(true));
         }
     });
     st.on_close_details({
@@ -861,7 +914,7 @@ pub fn setup(ui: &MainWindow) {
     });
     st.on_open_backups(|| {
         let dir = data::backup_root();
-        let dir = if dir.is_dir() { dir } else { data::root().to_path_buf() };
+        let dir = if fsx::plain_dir(&dir) == Some(true) { dir } else { data::root().to_path_buf() };
         let _ = sys::launch("explorer.exe", &sys::quoted(&dir));
     });
     st.on_restart_admin(|| {
@@ -902,7 +955,9 @@ pub fn setup(ui: &MainWindow) {
             let now = !ui.global::<Theme>().get_dark();
             crossfade(&ui, || {
                 ui.global::<Theme>().set_dark(now);
-                data::write_setting("theme.txt", if now { "dark" } else { "light" });
+                if settings::remember_on() {
+                    data::write_setting("theme.txt", if now { "dark" } else { "light" });
+                }
                 if ui.global::<AppState>().get_glass_active() {
                     winui::set_dark(now);
                 }
@@ -1125,4 +1180,3 @@ pub fn bind_window(ui: &MainWindow) {
         }
     });
 }
-

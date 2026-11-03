@@ -21,9 +21,12 @@ component DetailLine inherits Rise {
     Rectangle {
         y: 3px;
         height: parent.height - 6px;
-        border-radius: 14px;
-        background: ta.has-hover ? Theme.hover : transparent;
-        animate background { duration: 140ms; }
+        Rectangle {
+            border-radius: 14px;
+            background: ta.has-hover ? Theme.hover : transparent;
+            animate background { duration: 140ms; }
+            opacity: root.v;
+        }
         Rectangle {
             x: 0px;
             width: parent.width * root.item.share;
@@ -118,8 +121,10 @@ component NavItem inherits Rectangle {
 
     property <float> hover-a: ta.has-hover && !root.active ? 1 : 0;
     property <float> active-a: root.active ? 1 : 0;
-    animate hover-a { duration: 160ms; }
-    animate active-a { duration: 200ms; }
+    property <float> press-a: ta.pressed ? 1 : 0;
+    animate hover-a { duration: 140ms; easing: ease-out; }
+    animate active-a { duration: root.active ? 200ms : 0ms; easing: ease-out; }
+    animate press-a { duration: Theme.calm ? 0ms : 90ms; }
 
     Sq {
         r: 9.5;
@@ -135,13 +140,20 @@ component NavItem inherits Rectangle {
         visible: root.active-a > 0.001;
     }
 
+    Sq {
+        r: 9.5;
+        colorize: Theme.press;
+        fade: root.press-a;
+        visible: root.press-a > 0.001;
+    }
+
     Rectangle {
         x: 0px;
         width: 3px;
         height: root.active ? 19px : 0px;
         border-radius: 2px;
         background: Theme.accent;
-        animate height { duration: 300ms; easing: spring(0.15); }
+        animate height { duration: root.active ? 300ms : 0ms; easing: spring(0.15); }
     }
 
     HorizontalLayout {
@@ -150,16 +162,17 @@ component NavItem inherits Rectangle {
         Icon {
             kind: root.icon;
             size: 17px;
-            colorize: root.active ? Theme.accent : Theme.text-dim;
+            colorize: root.active || ta.pressed ? Theme.accent : ta.has-hover ? Theme.text : Theme.text-dim;
             y: (parent.height - self.height) / 2;
-            animate colorize { duration: Theme.quiet ? 0ms : 180ms; }
+            animate colorize { duration: root.active ? 180ms : 0ms; }
         }
         Text {
             text: root.text;
-            color: root.active ? Theme.text : Theme.text-dim;
+            color: root.active || ta.has-hover ? Theme.text : Theme.text-dim;
             font-size: 13px;
             font-weight: Theme.semi;
             vertical-alignment: center;
+            animate color { duration: root.active ? 140ms : 0ms; }
         }
     }
 
@@ -173,17 +186,24 @@ component NavItem inherits Rectangle {
 
 component Backdrop inherits Rectangle {
     in property <bool> veil: false;
+    in property <float> alpha: 1;
     width: 100%;
     height: 100%;
-    background: !root.veil && AppState.glass-active ? Theme.glass-tint : Theme.bg-gradient;
     clip: true;
 
+    Rectangle {
+        width: 100%;
+        height: 100%;
+        background: !root.veil && AppState.glass-active ? Theme.glass-tint : Theme.bg-gradient;
+        opacity: root.alpha;
+    }
     Rectangle {
         x: -240px;
         y: -260px;
         width: 720px;
         height: 720px;
         background: Theme.blob-a;
+        opacity: root.alpha;
     }
     Rectangle {
         x: parent.width - 480px;
@@ -191,6 +211,7 @@ component Backdrop inherits Rectangle {
         width: 720px;
         height: 720px;
         background: Theme.blob-b;
+        opacity: root.alpha;
     }
     Rectangle {
         x: parent.width - 520px;
@@ -198,6 +219,7 @@ component Backdrop inherits Rectangle {
         width: 640px;
         height: 640px;
         background: Theme.blob-c;
+        opacity: root.alpha;
     }
 }
 
@@ -215,6 +237,11 @@ export component MainWindow inherits Window {
     animate veil { duration: Theme.veil-ms * 1ms; easing: spring(0); }
     changed veil => {
         Theme.page-a = 1 - self.veil;
+    }
+    property <float> night: Theme.dark ? 1 : 0;
+    animate night { duration: Theme.fade-ms * 1ms; easing: cubic-bezier(0.25, 0.46, 0.45, 0.94); }
+    changed night => {
+        Theme.night = self.night;
     }
     property <int> target-page: AppState.page;
     changed target-page => {
@@ -395,7 +422,8 @@ export component MainWindow inherits Window {
                     border-color: Theme.card-border;
                     Rectangle {
                         border-radius: 17px;
-                        background: theme-ta.has-hover ? Theme.hover : transparent;
+                        background: theme-ta.pressed ? Theme.press : theme-ta.has-hover ? Theme.hover : transparent;
+                        animate background { duration: Theme.calm ? 0ms : 100ms; }
                     }
                     Icon {
                         kind: Theme.dark ? "sun" : "moon";
@@ -418,7 +446,8 @@ export component MainWindow inherits Window {
                     border-color: Theme.card-border;
                     Rectangle {
                         border-radius: 17px;
-                        background: lang-ta.has-hover ? Theme.hover : transparent;
+                        background: lang-ta.pressed ? Theme.press : lang-ta.has-hover ? Theme.hover : transparent;
+                        animate background { duration: Theme.calm ? 0ms : 100ms; }
                     }
                     Text {
                         text: T.s("lang.button");
@@ -477,13 +506,13 @@ export component MainWindow inherits Window {
         width: 100%;
     }
 
-    Rectangle {
+    dialog-scrim := Rectangle {
+        property <float> a: AppState.dialog-open ? 1 : 0;
+        animate a { duration: 200ms; easing: ease-out; }
         width: 100%;
         height: 100%;
-        opacity: AppState.dialog-open ? 1 : 0;
-        visible: self.opacity > 0.01;
-        background: Theme.scrim;
-        animate opacity { duration: 200ms; easing: ease-out; }
+        visible: self.a > 0.01;
+        background: Theme.scrim.transparentize(1 - self.a);
         TouchArea {
             clicked => {
                 AppState.dialog-cancel();
@@ -499,12 +528,14 @@ export component MainWindow inherits Window {
             Rectangle {
                 border-radius: 24px;
                 background: #00000002;
+                opacity: dialog-scrim.a;
                 drop-shadow-color: Theme.shadow;
                 drop-shadow-blur: 40px;
                 drop-shadow-offset-y: 16px;
             }
             Sq {
                 r: 24;
+                fade: dialog-scrim.a;
                 colorize: Theme.dialog-bg;
                 edge: Theme.card-border;
                 edge-width: 1px;
@@ -516,6 +547,7 @@ export component MainWindow inherits Window {
                 spacing: 9.5px;
                 Text {
                     text: AppState.dialog-title;
+                    opacity: dialog-scrim.a;
                     color: Theme.text;
                     font-size: 18px;
                     font-weight: 700;
@@ -523,6 +555,7 @@ export component MainWindow inherits Window {
                 }
                 Text {
                     text: AppState.dialog-text;
+                    opacity: dialog-scrim.a;
                     color: Theme.text-dim;
                     font-size: 12.5px;
                     wrap: word-wrap;
@@ -534,14 +567,14 @@ export component MainWindow inherits Window {
                     spacing: 9.5px;
                     alignment: end;
                     if !AppState.dialog-single: SecondaryButton {
-                        fade: 1;
+                        fade: dialog-scrim.a;
                         text: T.s("dialog.cancel");
                         clicked => {
                             AppState.dialog-cancel();
                         }
                     }
                     PrimaryButton {
-                        fade: 1;
+                        fade: dialog-scrim.a;
                         text: AppState.dialog-single ? T.s("dialog.ok") : AppState.dialog-ok;
                         danger: AppState.dialog-danger;
                         clicked => {
@@ -553,13 +586,13 @@ export component MainWindow inherits Window {
         }
     }
 
-    Rectangle {
+    details-scrim := Rectangle {
+        property <float> a: AppState.details-open ? 1 : 0;
+        animate a { duration: 200ms; easing: ease-out; }
         width: 100%;
         height: 100%;
-        opacity: AppState.details-open ? 1 : 0;
-        visible: self.opacity > 0.01;
-        background: Theme.scrim;
-        animate opacity { duration: 200ms; easing: ease-out; }
+        visible: self.a > 0.01;
+        background: Theme.scrim.transparentize(1 - self.a);
         TouchArea {
             clicked => {
                 AppState.close-details();
@@ -571,12 +604,14 @@ export component MainWindow inherits Window {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             SoftShadow {
+                fade: details-scrim.a;
                 corner: 24px;
                 blur: 40px;
                 dy: 16px;
             }
             Sq {
                 r: 24;
+                fade: details-scrim.a;
                 colorize: Theme.dialog-bg;
                 edge: Theme.card-border;
                 edge-width: 1px;
@@ -588,8 +623,8 @@ export component MainWindow inherits Window {
                 width: parent.width - 2px;
                 height: parent.height - 2px;
                 border-radius: 23px;
-                background: Theme.dark ? #131a29 : #ffffff;
-                opacity: 0.94;
+                background: #131a29.mix(#ffffff, Theme.night);
+                opacity: 0.94 * details-scrim.a;
             }
             VerticalLayout {
                 padding: 24px;
@@ -598,7 +633,7 @@ export component MainWindow inherits Window {
                 HorizontalLayout {
                     spacing: 14px;
                     Chip {
-                        fade: 1;
+                        fade: details-scrim.a;
                         icon: AppState.details-icon;
                         tint: AppState.details-tint;
                         size: 48px;
@@ -611,6 +646,7 @@ export component MainWindow inherits Window {
                         min-width: 0px;
                         Text {
                             text: AppState.details-title;
+                            opacity: details-scrim.a;
                             color: Theme.text;
                             font-size: 19px;
                             font-weight: 700;
@@ -618,6 +654,7 @@ export component MainWindow inherits Window {
                         }
                         Text {
                             text: AppState.details-sub;
+                            opacity: details-scrim.a;
                             color: Theme.text-dim;
                             font-size: 12px;
                             wrap: word-wrap;
@@ -625,6 +662,7 @@ export component MainWindow inherits Window {
                     }
                     if AppState.details-total != "": Text {
                         text: AppState.details-total;
+                        opacity: details-scrim.a;
                         color: Theme.tint-fg(AppState.details-tint);
                         font-size: 22px;
                         font-weight: 700;
@@ -637,6 +675,7 @@ export component MainWindow inherits Window {
                 Rectangle {
                     height: 1px;
                     background: Theme.sep;
+                    opacity: details-scrim.a;
                 }
                 Rectangle {
                     height: 6px;
@@ -652,6 +691,7 @@ export component MainWindow inherits Window {
                         self.count = self.want;
                     }
                     for e in AppState.details-epoch: ds := Scroller {
+                        fade: details-scrim.a;
                         property <int> first: max(0, min(floor(self.scroll-y / 60px), AppState.details-rows.length - detail-box.count));
                         width: parent.width;
                         height: parent.height;
@@ -660,12 +700,14 @@ export component MainWindow inherits Window {
                             for k in detail-box.count: DetailLine {
                                 y: (ds.first + k) * 60px;
                                 order: k;
+                                fade: details-scrim.a;
                                 item: AppState.details-rows[ds.first + k];
                             }
                         }
                     }
                     if AppState.details-loading: Text {
                         text: T.s("details.loading");
+                        opacity: details-scrim.a;
                         color: Theme.text-dim;
                         font-size: 13px;
                         horizontal-alignment: center;
@@ -673,6 +715,7 @@ export component MainWindow inherits Window {
                     }
                     if !AppState.details-loading && AppState.details-rows.length == 0: Text {
                         text: T.s("details.empty");
+                        opacity: details-scrim.a;
                         color: Theme.text-dim;
                         font-size: 13px;
                         horizontal-alignment: center;
@@ -683,7 +726,7 @@ export component MainWindow inherits Window {
                     alignment: end;
                     padding-top: 10px;
                     SecondaryButton {
-                        fade: 1;
+                        fade: details-scrim.a;
                         text: T.s("details.close");
                         clicked => {
                             AppState.close-details();
@@ -694,17 +737,18 @@ export component MainWindow inherits Window {
         }
     }
 
-    Rectangle {
+    toast-box := Rectangle {
+        property <float> a: AppState.toast-open ? 1 : 0;
         width: min(440px, parent.width - 300px);
         height: 48px;
         x: (parent.width - self.width) / 2;
         property <length> lift: AppState.toast-open ? 0px : 80px;
         y: 18px - Theme.snap(self.lift);
-        opacity: AppState.toast-open ? 1 : 0;
         animate lift { duration: 320ms; easing: spring(0.1); }
-        animate opacity { duration: 220ms; }
+        animate a { duration: 220ms; }
         visible: self.lift < 79px;
         SoftShadow {
+            fade: toast-box.a;
             corner: 24px;
             blur: 24px;
             dy: 8px;
@@ -714,6 +758,7 @@ export component MainWindow inherits Window {
             background: Theme.dialog-bg;
             border-width: 1px;
             border-color: Theme.card-border;
+            opacity: toast-box.a;
         }
         HorizontalLayout {
             padding-left: 12px;
@@ -724,16 +769,18 @@ export component MainWindow inherits Window {
                 width: 26px;
                 height: 26px;
                 border-radius: 13px;
-                background: Theme.ok-soft;
+                background: Theme.ok-soft.transparentize(1 - toast-box.a);
                 y: (parent.height - self.height) / 2;
                 Icon {
                     kind: "check";
                     size: 14px;
+                    opacity: toast-box.a;
                     colorize: Theme.ok;
                 }
             }
             Text {
                 text: AppState.toast-text;
+                opacity: toast-box.a;
                 color: Theme.text;
                 font-size: 13px;
                 font-weight: Theme.semi;
@@ -746,16 +793,10 @@ export component MainWindow inherits Window {
 
     Backdrop {
         veil: true;
-        opacity: 1 - Theme.content-opacity;
-        visible: Theme.content-opacity < 0.999;
-    }
-
-    Image {
-        width: 100%;
-        height: 100%;
-        source: Theme.fade-image;
-        opacity: Theme.fade-opacity;
-        visible: Theme.fade-opacity > 0.001;
+        property <float> a: Theme.content-opacity;
+        animate a { duration: Theme.content-ms * 1ms; easing: ease-in-out; }
+        alpha: 1 - self.a;
+        visible: self.a < 0.999;
     }
 
     ResizeEdges {

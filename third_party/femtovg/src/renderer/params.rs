@@ -22,7 +22,7 @@ pub struct Params {
     pub(crate) stroke_thr: f32,
     pub(crate) tex_type: f32,
     pub(crate) shader_type: ShaderType,
-    pub(crate) glyph_texture_type: u8, // 0 -> no glyph rendering, 1 -> alpha mask, 2 -> color texture
+    pub(crate) glyph_texture_type: u8,
     pub(crate) image_blur_filter_direction: [f32; 2],
     pub(crate) image_blur_filter_sigma: f32,
     pub(crate) image_blur_filter_coeff: [f32; 3],
@@ -42,7 +42,6 @@ impl Params {
     ) -> Self {
         let mut params = Self::default();
 
-        // Scissor
         let (scissor_ext, scissor_scale) = if let Some(ext) = scissor.extent {
             if ext[0] < -0.5 || ext[1] < -0.5 {
                 ([1.0, 1.0], [1.0, 1.0])
@@ -211,7 +210,6 @@ impl Params {
                 let effective_r = (avg_x + avg_y) * 0.5;
                 let f = ((out_rx - in_rx) + (out_ry - in_ry)) * 0.5;
 
-                // squash into an ellipse
                 let mut transform = Transform2D::scaling(avg_x / effective_r, avg_y / effective_r);
                 transform.translate(*cx, *cy);
                 transform *= *global_transform;

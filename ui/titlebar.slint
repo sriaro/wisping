@@ -5,8 +5,8 @@ component TitleButton inherits Rectangle {
     in property <string> glyph;
     callback clicked;
     width: 46px;
-    background: ta.pressed ? (danger ? #c42b1ce6 : Theme.hover) : (ta.has-hover ? (danger ? #c42b1c : Theme.hover) : transparent);
-    animate background { duration: 90ms; }
+    background: ta.pressed ? (danger ? #c42b1ce6 : Theme.press) : (ta.has-hover ? (danger ? #c42b1c : Theme.hover) : transparent);
+    animate background { duration: 70ms; }
     Text {
         text: root.glyph;
         font-family: "Segoe Fluent Icons";

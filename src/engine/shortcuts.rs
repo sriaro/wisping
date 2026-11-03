@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::io::Read;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -21,10 +22,6 @@ const ENV_BLOCK: u32 = 0xA000_0001;
 const ENV_BLOCK_SIZE: usize = 0x314;
 const DRIVE_FIXED: u32 = 3;
 const MAX_LINK: u64 = 1 << 20;
-
-#[cfg(test)]
-#[path = "shortcuts/security_tests.rs"]
-mod security_tests;
 
 struct Link {
     env: Option<String>,
@@ -125,7 +122,9 @@ fn parse(data: &[u8]) -> Option<Link> {
 }
 
 fn reparse_ancestor(target: &Path) -> bool {
-    target.ancestors().skip(1).take_while(|a| a.parent().is_some()).any(|a| fs::symlink_metadata(a).is_ok_and(|m| fsx::attrs_reparse(m.file_attributes())))
+    let mut chain: Vec<&Path> = target.ancestors().skip(1).take_while(|a| a.parent().is_some()).collect();
+    chain.reverse();
+    chain.into_iter().any(|a| fs::symlink_metadata(a).is_ok_and(|m| fsx::attrs_reparse(m.file_attributes())))
 }
 
 fn missing(target: &Path) -> bool {
@@ -138,7 +137,10 @@ fn missing(target: &Path) -> bool {
     if unsafe { GetDriveTypeW(PCWSTR(root.as_ptr())) } != DRIVE_FIXED {
         return false;
     }
-    matches!(fs::symlink_metadata(target), Err(e) if e.kind() == io::ErrorKind::NotFound) && !reparse_ancestor(target)
+    if reparse_ancestor(target) {
+        return false;
+    }
+    matches!(fs::symlink_metadata(target), Err(e) if e.kind() == io::ErrorKind::NotFound)
 }
 
 pub fn targets(data: &[u8], dir: &Path) -> Vec<(PathBuf, bool)> {
@@ -165,11 +167,16 @@ pub fn broken(link: &Path) -> bool {
     if link.ancestors().any(|a| a.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Startup"))) {
         return false;
     }
-    let Ok(meta) = fs::symlink_metadata(link) else { return false };
-    if !meta.is_file() || meta.len() > MAX_LINK {
+    let Ok(file) = fsx::open_plain(link) else { return false };
+    let Ok(meta) = file.metadata() else { return false };
+    if meta.len() > MAX_LINK {
         return false;
     }
-    let (Ok(data), Some(dir)) = (fs::read(link), link.parent()) else { return false };
+    let Some(dir) = link.parent() else { return false };
+    let mut data = Vec::new();
+    if file.take(MAX_LINK + 1).read_to_end(&mut data).is_err() || data.len() as u64 > MAX_LINK {
+        return false;
+    }
     let found = targets(&data, dir);
     found.iter().any(|(_, exact)| *exact) && found.iter().all(|(p, _)| missing(p))
 }

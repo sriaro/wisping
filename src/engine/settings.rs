@@ -21,7 +21,11 @@ pub struct WindowState {
 }
 
 pub fn flag(text: &str, key: &str) -> Option<bool> {
-    text_value(text, key).map(|v| v != "0")
+    match text_value(text, key)?.as_str() {
+        "0" => Some(false),
+        "1" => Some(true),
+        _ => None,
+    }
 }
 
 fn text_value(text: &str, key: &str) -> Option<String> {
@@ -121,7 +125,11 @@ pub fn set_remember(on: bool) {
     REMEMBER.store(on, Ordering::SeqCst);
     save_flags();
     if !on {
-        let _ = fsx::PinnedDir::open(data::root()).and_then(|dir| dir.remove_file(STATE.as_ref()));
+        let _ = fsx::PinnedDir::open(&data::root()).and_then(|dir| {
+            let _ = dir.remove_file(STATE.as_ref());
+            let _ = dir.remove_file("theme.txt".as_ref());
+            Ok(())
+        });
     }
 }
 
@@ -152,8 +160,5 @@ pub fn save_clean_list(ids: &[&str]) {
 }
 
 pub fn clean_list() -> Option<Vec<String>> {
-    if !remember_on() {
-        return None;
-    }
     data::read_setting(CLEAN).map(|text| text.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
 }

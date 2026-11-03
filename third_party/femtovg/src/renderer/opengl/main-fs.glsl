@@ -51,7 +51,6 @@ float sdroundrect(vec2 pt, vec2 ext, float rad) {
     return min(max(d.x,d.y),0.0) + length(max(d,0.0)) - rad;
 }
 
-// Scissoring
 float scissorMask(vec2 p) {
     if (scissorRadius > 0.0) {
         vec2 pt = (scissorMat * vec3(p,1.0)).xy;
@@ -65,21 +64,11 @@ float scissorMask(vec2 p) {
 }
 
 #ifdef EDGE_AA
-// Stroke - from [0..1] to clipped pyramid, where the slope is 1px.
 float strokeMask() {
     return min(1.0, (1.0-abs(ftcoord.x*2.0-1.0))*strokeMult) * min(1.0, ftcoord.y);
-    // Using this smoothstep preduces maybe better results when combined with fringe_width of 2, but it may look blurrier
-    // maybe this should be controlled via flag
-    //return smoothstep(0.0, 1.0, (1.0-abs(ftcoord.x*2.0-1.0))*strokeMult) * smoothstep(0.0, 1.0, ftcoord.y);
 }
 #endif
 
-// Interleaved gradient noise (Jimenez 2014): a cheap, deterministic, screen-space
-// ordered dither. Offsetting the gradient colour by up to +/-0.5 of an 8-bit step
-// before the framebuffer quantizes it spreads the rounding spatially, breaking up
-// the banding that appears between close colours over a large gradient (issue
-// femtovg/femtovg#239). The offset is sub-LSB, so solid regions are unaffected and
-// the Unorm write clamps it away at the 0.0/1.0 extremes.
 float ditherNoise(vec2 p) {
     return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
 }
@@ -89,16 +78,13 @@ vec4 ditherGradient(vec4 color) {
 }
 
 vec4 renderGradient() {
-    // Calculate gradient color using box gradient
     vec2 pt = (paintMat * vec3(fpos, 1.0)).xy;
 
     float d = clamp((sdroundrect(pt, extent, radius) + feather*0.5) / feather, 0.0, 1.0);
     return ditherGradient(mix(innerCol,outerCol,d));
 }
 
-// Image-based Gradient; sample a texture using the gradient position.
 vec4 renderImageGradient() {
-    // Calculate gradient color using box gradient
     vec2 pt = (paintMat * vec3(fpos, 1.0)).xy;
 
     float d = clamp((sdroundrect(pt, extent, radius) + feather*0.5) / feather, 0.0, 1.0);
@@ -107,11 +93,6 @@ vec4 renderImageGradient() {
 
 float conicAngleFraction() {
     vec2 pt = (paintMat * vec3(fpos, 1.0)).xy;
-    // Measure the angle clockwise from the positive x axis. In the gradient's
-    // local space (y points down on screen), atan(pt.y, pt.x) increases in the
-    // clockwise direction, so offset 0 sits at 3 o'clock and the ramp proceeds
-    // clockwise, matching Canvas 2D createConicGradient. fract() wraps the angle
-    // into [0, 1) for negative or large start angles.
     return fract((atan(pt.y, pt.x) - conicStartAngle) / TAU);
 }
 
@@ -126,7 +107,6 @@ vec4 renderImageGradientConic() {
 }
 
 vec4 renderImage() {
-    // Calculate color from texture
     vec2 pt = (paintMat * vec3(fpos, 1.0)).xy / extent;
 
     vec4 color = texture2D(tex, pt);
@@ -134,7 +114,6 @@ vec4 renderImage() {
     if (texType == 1) color = vec4(color.xyz * color.w, color.w);
     if (texType == 2) color = vec4(color.x);
 
-    // Apply color tint and alpha.
     color *= innerCol;
     return color;
 }
@@ -143,7 +122,6 @@ vec4 renderPlainTextureCopy() {
     vec4 color = texture2D(tex, ftcoord);
     if (texType == 1) color = vec4(color.xyz * color.w, color.w);
     if (texType == 2) color = vec4(color.x);
-    // Apply color tint and alpha.
     color *= innerCol;
     return color;
 }
@@ -158,9 +136,6 @@ vec4 renderFilteredImage() {
     gaussian_coeff.xy *= gaussian_coeff.yz;
 
     for (float i = 1.0; i <= 24.0; i += 1.) {
-        // Work around GLES 2.0 limitation of only allowing constant loop indices by
-        // breaking here. Sigma is clamped to 8 on the Rust side and the kernel reaches
-        // +/-3*sigma, so the tap count never exceeds this 24-iteration bound.
         if (i >= sampleCount) {
             break;
         }
@@ -168,8 +143,6 @@ vec4 renderFilteredImage() {
         color_sum += texture2D(tex, (fpos.xy + i * imageBlurFilterDirection) / extent) * gaussian_coeff.x;
         coefficient_sum += 2.0 * gaussian_coeff.x;
 
-        // Compute the coefficients incrementally:
-        // https://developer.nvidia.com/gpugems/gpugems3/part-vi-gpu-computing/chapter-40-incremental-computation-gaussian
         gaussian_coeff.xy *= gaussian_coeff.yz;
     }
 
@@ -182,11 +155,6 @@ vec4 renderFilteredImage() {
 }
 
 vec4 renderColorMatrix() {
-    // The 4x5 color matrix is packed row-major into frag[0..4] (the scissor/paint
-    // matrix slots, unused during a filter pass). Apply it in unpremultiplied
-    // sRGB space, clamp to [0,1], then re-premultiply: unpremultiplying avoids
-    // edge halos and the clamp keeps overflowing matrices from producing
-    // out-of-range or NaN pixels.
     vec4 c = texture2D(tex, fpos.xy / extent);
     if (c.a > 0.0) {
         c.rgb /= c.a;
@@ -214,26 +182,19 @@ void main(void) {
 #endif
 
 #if SELECT_SHADER == SHADER_TYPE_FillGradient
-    // Gradient
     result = renderGradient();
 #elif SELECT_SHADER == SHADER_TYPE_FillImageGradient
-    // Image-based Gradient; sample a texture using the gradient position.
     result = renderImageGradient();
 #elif SELECT_SHADER == SHADER_TYPE_FillImage
-    // Image
     result = renderImage();
 #elif SELECT_SHADER == SHADER_TYPE_FillColor
-    // Plain color fill
     result = innerCol;
 #elif SELECT_SHADER == SHADER_TYPE_TextureCopyUnclipped
-    // Plain texture copy, unclipped
     gl_FragColor = renderPlainTextureCopy();
     return;
 #elif SELECT_SHADER == SHADER_TYPE_Stencil
-    // Stencil fill
     result = vec4(1,1,1,1);
 #elif SELECT_SHADER == SHADER_TYPE_FilterImage
-    // Filter Image
     result = renderFilteredImage();
 #elif SELECT_SHADER == SHADER_TYPE_FillGradientConic
     result = renderGradientConic();
@@ -248,7 +209,6 @@ void main(void) {
     float scissor = scissorMask(fpos);
 
 #ifdef ENABLE_GLYPH_TEXTURE
-    // Textured tris
     vec4 mask = texture2D(glyphtex, ftcoord);
 
     if (glyphTextureType == 1) {
@@ -262,8 +222,6 @@ void main(void) {
     result *= mask;
 #else
 #if SELECT_SHADER != SHADER_TYPE_Stencil && SELECT_SHADER != SHADER_TYPE_FilterImage && SELECT_SHADER != SHADER_TYPE_FilterImageColorMatrix
-        // Not stencil fill
-        // Combine alpha
         result *= strokeAlpha * scissor;
 #endif
 #endif
