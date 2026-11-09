@@ -739,9 +739,9 @@ export component MainWindow inherits Window {
 
     toast-box := Rectangle {
         property <float> a: AppState.toast-open ? 1 : 0;
-        width: min(440px, parent.width - 300px);
-        height: 48px;
-        x: (parent.width - self.width) / 2;
+        width: min(max(320px, toast-row.preferred-width), parent.width - 300px);
+        height: max(48px, toast-row.preferred-height);
+        x: Theme.snap((parent.width - self.width) / 2);
         property <length> lift: AppState.toast-open ? 0px : 80px;
         y: 18px - Theme.snap(self.lift);
         animate lift { duration: 320ms; easing: spring(0.1); }
@@ -760,9 +760,11 @@ export component MainWindow inherits Window {
             border-color: Theme.card-border;
             opacity: toast-box.a;
         }
-        HorizontalLayout {
+        toast-row := HorizontalLayout {
             padding-left: 12px;
             padding-right: 22px;
+            padding-top: 11px;
+            padding-bottom: 11px;
             spacing: 11px;
             alignment: center;
             Rectangle {
@@ -785,7 +787,7 @@ export component MainWindow inherits Window {
                 font-size: 13px;
                 font-weight: Theme.semi;
                 vertical-alignment: center;
-                overflow: elide;
+                wrap: word-wrap;
             }
         }
     }

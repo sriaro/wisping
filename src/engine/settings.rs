@@ -124,12 +124,10 @@ pub fn set_lang(code: u8) {
 pub fn set_remember(on: bool) {
     REMEMBER.store(on, Ordering::SeqCst);
     save_flags();
-    if !on {
-        let _ = fsx::PinnedDir::open(&data::root()).and_then(|dir| {
+    if !on
+        && let Ok(dir) = fsx::PinnedDir::open(&data::root()) {
             let _ = dir.remove_file(STATE.as_ref());
             let _ = dir.remove_file("theme.txt".as_ref());
-            Ok(())
-        });
     }
 }
 

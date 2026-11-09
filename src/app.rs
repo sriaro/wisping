@@ -111,11 +111,12 @@ impl Ctx {
 pub fn toast(c: &Ctx, text: String) {
     let Some(ui) = c.weak.upgrade() else { return };
     let st = ui.global::<AppState>();
+    let shown = (3400 + 45 * text.chars().count().saturating_sub(40) as u64).min(7000);
     st.set_toast_text(text.into());
     st.set_toast_open(true);
     let weak = c.weak.clone();
     TOAST.with(|t| {
-        t.start(TimerMode::SingleShot, Duration::from_millis(3400), move || {
+        t.start(TimerMode::SingleShot, Duration::from_millis(shown), move || {
             if let Some(ui) = weak.upgrade() {
                 ui.global::<AppState>().set_toast_open(false);
             }
