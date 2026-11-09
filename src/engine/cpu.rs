@@ -1,38 +1,32 @@
 use std::sync::OnceLock;
 
-use windows::Win32::System::SystemInformation::{GetLogicalProcessorInformationEx, LOGICAL_PROCESSOR_RELATIONSHIP, RelationCache, RelationProcessorCore, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX};
+use windows::Win32::System::SystemInformation::{GetLogicalProcessorInformationEx, LOGICAL_PROCESSOR_RELATIONSHIP, RelationProcessorCore, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX};
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadInformation, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN, THREAD_POWER_THROTTLING_CURRENT_VERSION, THREAD_POWER_THROTTLING_EXECUTION_SPEED,
     THREAD_MODE_BACKGROUND_END, THREAD_POWER_THROTTLING_STATE, THREAD_PRIORITY_BELOW_NORMAL, THREAD_PRIORITY_NORMAL, ThreadPowerThrottling,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Topology {
     pub logical: usize,
-    pub cores: usize,
     pub fast_cores: usize,
-    pub hybrid: bool,
-    pub smt: bool,
-    pub l3_groups: usize,
 }
 
 pub fn topology() -> &'static Topology {
     static TOPO: OnceLock<Topology> = OnceLock::new();
-    TOPO.get_or_init(|| shape(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4), &cores(), l3_groups()))
+    TOPO.get_or_init(|| shape(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4), &cores()))
 }
 
-pub fn shape(allowed: usize, cores: &[(u8, usize)], l3_groups: usize) -> Topology {
+pub fn shape(allowed: usize, cores: &[(u8, usize)]) -> Topology {
     let logical = allowed.max(1);
     if cores.is_empty() {
-        return Topology { logical, cores: logical, fast_cores: logical, hybrid: false, smt: false, l3_groups: 1 };
+        return Topology { logical, fast_cores: logical };
     }
     let total: usize = cores.iter().map(|c| c.1).sum::<usize>().max(1);
     let top = cores.iter().map(|c| c.0).max().unwrap_or(0);
-    let hybrid = cores.iter().any(|c| c.0 != top);
     let scale = |n: usize| (n * logical).div_ceil(total).clamp(1, logical);
     let all = scale(cores.len());
     let fast = scale(cores.iter().filter(|c| c.0 == top).count()).min(all);
-    Topology { logical, cores: all, fast_cores: fast, hybrid, smt: cores.iter().any(|c| c.1 > 1), l3_groups: l3_groups.max(1) }
+    Topology { logical, fast_cores: fast }
 }
 
 pub fn io_threads() -> usize {
@@ -129,14 +123,4 @@ fn cores() -> Vec<(u8, usize)> {
         out.push((p.EfficiencyClass, threads.max(1)));
     });
     out
-}
-
-fn l3_groups() -> usize {
-    let mut n = 0;
-    walk(RelationCache, |rec| {
-        if unsafe { rec.Anonymous.Cache.Level } == 3 {
-            n += 1;
-        }
-    });
-    n
 }

@@ -1,11 +1,11 @@
-use std::{borrow::Borrow, cell::RefCell, ffi::OsStr, fs, hash::Hash, path::Path as FilePath, rc::Rc};
+use std::{borrow::Borrow, cell::RefCell, hash::Hash, rc::Rc};
 
 use fnv::FnvHashMap;
 use slotmap::{DefaultKey, SlotMap};
 
 use crate::{
-    paint::{FontVariations, PaintFlavor, StrokeSettings},
-    Canvas, Color, ErrorKind, FillRule, ImageFlags, ImageId, ImageInfo, Paint, PixelFormat, PositionedGlyph,
+    paint::{PaintFlavor, StrokeSettings},
+    Canvas, Color, ErrorKind, FillRule, ImageFlags, ImageId, ImageInfo, PixelFormat, PositionedGlyph,
     RenderTarget, Renderer,
 };
 
@@ -14,7 +14,6 @@ pub use atlas::Atlas;
 
 mod font;
 use font::{Font, GlyphRendering};
-pub use font::{FontMetrics, VariationAxisInfo};
 
 const GLYPH_PADDING: u32 = 1;
 const GLYPH_MARGIN: u32 = 1;
@@ -23,23 +22,6 @@ const TEXTURE_SIZE: usize = 512;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct FontId(DefaultKey);
-
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Default)]
-pub enum Baseline {
-    Top,
-    Middle,
-    #[default]
-    Alphabetic,
-    Bottom,
-}
-
-#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Default)]
-pub enum Align {
-    #[default]
-    Left,
-    Center,
-    Right,
-}
 
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq, Default)]
 pub enum RenderMode {
@@ -106,36 +88,12 @@ pub struct FontTexture {
 pub struct TextContext(pub(crate) Rc<RefCell<TextContextImpl>>);
 
 impl TextContext {
-    pub fn add_font_dir<T: AsRef<FilePath>>(&self, path: T) -> Result<Vec<FontId>, ErrorKind> {
-        self.0.borrow_mut().add_font_dir(path)
-    }
-
-    pub fn add_font_file<T: AsRef<FilePath>>(&self, path: T) -> Result<FontId, ErrorKind> {
-        self.0.borrow_mut().add_font_file(path)
-    }
-
-    pub fn add_font_mem(&self, data: &[u8]) -> Result<FontId, ErrorKind> {
-        self.0.borrow_mut().add_font_mem(data)
-    }
-
     pub fn add_shared_font_with_index<T: AsRef<[u8]> + 'static>(
         &self,
         data: T,
         face_index: u32,
     ) -> Result<FontId, ErrorKind> {
         self.0.borrow_mut().add_shared_font_with_index(data, face_index)
-    }
-
-    pub fn measure_font(&self, paint: &Paint) -> Result<FontMetrics, ErrorKind> {
-        self.0
-            .borrow_mut()
-            .measure_font(paint.text.font_size, &paint.text.font_ids, &paint.text.font_variations)
-    }
-
-    pub fn font_variation_axes(&self, font_id: FontId) -> Result<Vec<VariationAxisInfo>, ErrorKind> {
-        let ctx = RefCell::borrow(&self.0);
-        let font = ctx.font(font_id).ok_or(ErrorKind::NoFontFound)?;
-        Ok(font.variation_axes())
     }
 }
 
@@ -164,56 +122,6 @@ impl TextContextImpl {
         self.swash_scale_context.clone()
     }
 
-    pub fn add_font_dir<T: AsRef<FilePath>>(&mut self, path: T) -> Result<Vec<FontId>, ErrorKind> {
-        let path = path.as_ref();
-        let mut fonts = Vec::new();
-
-        if path.is_dir() {
-            for entry in fs::read_dir(path)? {
-                let entry = entry?;
-                let path = entry.path();
-
-                if path.is_dir() {
-                    self.add_font_dir(&path)?;
-                } else if Some("ttf") == path.extension().and_then(OsStr::to_str) {
-                    fonts.push(self.add_font_file(path)?);
-                } else if Some("ttc") == path.extension().and_then(OsStr::to_str) {
-                    fonts.extend(self.add_font_file_collection(path)?);
-                }
-            }
-        }
-
-        Ok(fonts)
-    }
-
-    pub fn add_font_file<T: AsRef<FilePath>>(&mut self, path: T) -> Result<FontId, ErrorKind> {
-        let data = std::fs::read(path)?;
-
-        self.add_font_mem(&data)
-    }
-
-    pub fn add_font_file_collection<T: AsRef<FilePath>>(
-        &mut self,
-        path: T,
-    ) -> Result<impl Iterator<Item = FontId> + '_, ErrorKind> {
-        let data = std::fs::read(path)?;
-
-        let count = swash::FontDataRef::new(&data).map_or(1, |d| d.len() as u32);
-        Ok((0..count).filter_map(move |index| self.add_font_mem_with_index(&data, index).ok()))
-    }
-
-    pub fn add_font_mem(&mut self, data: &[u8]) -> Result<FontId, ErrorKind> {
-        self.add_font_mem_with_index(data, 0)
-    }
-
-    pub fn add_font_mem_with_index(&mut self, data: &[u8], face_index: u32) -> Result<FontId, ErrorKind> {
-        self.clear_caches();
-
-        let data_copy = data.to_owned();
-        let font = Font::new_with_data(data_copy, face_index, self)?;
-        Ok(FontId(self.fonts.insert(font)))
-    }
-
     pub fn add_shared_font_with_index<T: AsRef<[u8]> + 'static>(
         &mut self,
         data: T,
@@ -225,30 +133,11 @@ impl TextContextImpl {
         Ok(FontId(self.fonts.insert(font)))
     }
 
-    pub fn font(&self, id: FontId) -> Option<&Font> {
-        self.fonts.get(id.0)
-    }
-
     pub fn font_mut(&mut self, id: FontId) -> Option<&mut Font> {
         self.fonts.get_mut(id.0)
     }
 
     fn clear_caches(&mut self) {
-    }
-
-    pub fn measure_font(
-        &self,
-        font_size: f32,
-        font_ids: &[Option<FontId>; 8],
-        variations: &FontVariations,
-    ) -> Result<FontMetrics, ErrorKind> {
-        if let Some(Some(id)) = font_ids.first() {
-            if let Some(font) = self.font(*id) {
-                return Ok(font.metrics_with_variations(font_size, variations));
-            }
-        }
-
-        Err(ErrorKind::NoFontFound)
     }
 }
 

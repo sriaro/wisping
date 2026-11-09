@@ -11,7 +11,7 @@ mod error;
 pub use error::ErrorKind;
 
 pub use text::{
-    Align, Atlas, Baseline, DrawCommand, FontId, FontMetrics, GlyphDrawCommands, Quad, RenderMode, VariationAxisInfo,
+    Atlas, DrawCommand, FontId, GlyphDrawCommands, Quad, RenderMode,
 };
 
 pub use text::TextContext;
@@ -28,7 +28,7 @@ pub use color::Color;
 pub mod renderer;
 pub use renderer::{RenderTarget, Renderer};
 
-use renderer::{Command, CommandType, Drawable, Params, ShaderType, SurfacelessRenderer, Vertex};
+use renderer::{Command, CommandType, Drawable, Params, ShaderType, Vertex};
 
 pub(crate) mod geometry;
 pub use geometry::Transform2D;
@@ -36,7 +36,6 @@ use geometry::*;
 
 mod paint;
 pub use paint::Paint;
-pub use paint::TextDecoration;
 use paint::{GlyphTexture, PaintFlavor, StrokeSettings};
 
 mod path;
@@ -112,15 +111,6 @@ impl CompositeOperationState {
             src_alpha: sfactor,
             dst_rgb: dfactor,
             dst_alpha: dfactor,
-        }
-    }
-
-    pub fn with_blend_factors(src_factor: BlendFactor, dst_factor: BlendFactor) -> Self {
-        Self {
-            src_rgb: src_factor,
-            src_alpha: src_factor,
-            dst_rgb: dst_factor,
-            dst_alpha: dst_factor,
         }
     }
 }
@@ -397,22 +387,6 @@ where
         self.state_mut().alpha = alpha;
     }
 
-    pub fn set_shadow_color(&mut self, color: Color) {
-        self.state_mut().shadow_color = color;
-    }
-
-    pub fn set_shadow_blur(&mut self, blur: f32) {
-        if blur.is_finite() && blur >= 0.0 {
-            self.state_mut().shadow_blur = blur;
-        }
-    }
-
-    pub fn set_shadow_offset(&mut self, x: f32, y: f32) {
-        if x.is_finite() && y.is_finite() {
-            self.state_mut().shadow_offset = [x, y];
-        }
-    }
-
     pub fn global_composite_operation(&mut self, op: CompositeOperation) {
         self.state_mut().composite_operation = CompositeOperationState::new(op);
     }
@@ -467,14 +441,6 @@ where
         self.images.register_native_texture(&mut self.renderer, texture, info)
     }
 
-    pub fn create_image_from_external_texture(
-        &mut self,
-        texture: T::ExternalTexture,
-        info: ImageInfo,
-    ) -> Result<ImageId, ErrorKind> {
-        self.images.register_external_texture(&mut self.renderer, texture, info)
-    }
-
     pub fn create_image<'a, S: Into<ImageSource<'a>>>(
         &mut self,
         src: S,
@@ -496,22 +462,6 @@ where
 
     pub fn get_image(&self, id: ImageId) -> Option<&T::Image> {
         self.images.get(id)
-    }
-
-    pub fn get_image_mut(&mut self, id: ImageId) -> Option<&mut T::Image> {
-        self.images.get_mut(id)
-    }
-
-    pub fn realloc_image(
-        &mut self,
-        id: ImageId,
-        width: usize,
-        height: usize,
-        format: PixelFormat,
-        flags: ImageFlags,
-    ) -> Result<(), ErrorKind> {
-        let info = ImageInfo::new(flags, width, height, format);
-        self.images.realloc(&mut self.renderer, id, info)
     }
 
     pub fn update_image<'a, S: Into<ImageSource<'a>>>(
@@ -597,18 +547,6 @@ where
 
     pub fn scale(&mut self, x: f32, y: f32) {
         let t = Transform2D::scaling(x, y);
-        self.state_mut().transform.premultiply(&t);
-    }
-
-    pub fn skew_x(&mut self, angle: f32) {
-        let mut t = Transform2D::identity();
-        t.skew_x(angle);
-        self.state_mut().transform.premultiply(&t);
-    }
-
-    pub fn skew_y(&mut self, angle: f32) {
-        let mut t = Transform2D::identity();
-        t.skew_y(angle);
         self.state_mut().transform.premultiply(&t);
     }
 
@@ -715,10 +653,6 @@ where
         }
     }
 
-    pub fn reset_scissor(&mut self) {
-        self.state_mut().scissor = Scissor::default();
-    }
-
     pub fn contains_point(&self, path: &Path, x: f32, y: f32, fill_rule: FillRule) -> bool {
         let transform = self.state().transform;
 
@@ -733,14 +667,6 @@ where
         }
 
         path_cache.contains_point(x, y, fill_rule)
-    }
-
-    pub fn path_bbox(&self, path: &Path) -> Bounds {
-        let transform = self.state().transform;
-
-        let path_cache = path.cache(&transform, self.tess_tol, self.dist_tol);
-
-        path_cache.bounds
     }
 
     pub fn fill_path(&mut self, path: &Path, paint: &Paint) {
@@ -1223,12 +1149,6 @@ where
         self.verts.extend_from_slice(&verts);
     }
 
-    pub fn font_variation_axes(&self, font_id: FontId) -> Result<Vec<VariationAxisInfo>, ErrorKind> {
-        let ctx = self.text_context.borrow();
-        let font = ctx.font(font_id).ok_or(ErrorKind::NoFontFound)?;
-        Ok(font.variation_axes())
-    }
-
     pub fn fill_glyph_run(
         &mut self,
         font_id: FontId,
@@ -1518,23 +1438,6 @@ where
 
     fn state_mut(&mut self) -> &mut State {
         self.state_stack.last_mut().unwrap()
-    }
-}
-
-impl<T> Canvas<T>
-where
-    T: SurfacelessRenderer,
-{
-    pub fn flush(&mut self) {
-        self.renderer
-            .render_surfaceless(&mut self.images, &self.verts, std::mem::take(&mut self.commands));
-        self.verts.clear();
-        self.gradients
-            .release_old_gradients(&mut self.images, &mut self.renderer);
-        self.release_shadow_images();
-        if let Some(atlas) = self.ephemeral_glyph_atlas.take() {
-            atlas.clear(self);
-        }
     }
 }
 

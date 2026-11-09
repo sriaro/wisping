@@ -41,7 +41,7 @@ pub struct Core {
 
 pub type Shared = Arc<Mutex<Core>>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(PartialEq)]
 enum Scope {
     All,
     Targets,
@@ -411,7 +411,6 @@ pub fn error_text(err: &std::io::Error) -> String {
         "notask" => "msg.notask",
         "nofolder" => "msg.nofolder",
         "exists" => "msg.exists",
-        "unverifiable" => "msg.unverifiable",
         "undeletable" => "msg.undeletable",
         "nolocal" => "msg.nolocal",
         "notfull" => "msg.notfull",
@@ -425,6 +424,8 @@ pub fn error_text(err: &std::io::Error) -> String {
         "the desktop shell is unavailable" => "msg.noshell",
         "key missing" => "msg.keymissing",
         "backup is too large" => "msg.toolarge",
+        "toobig" => "msg.toobig",
+        "norecycle" => "msg.norecycle",
         "registry value cannot be backed up" | "registry value name is too long" | "unsupported value type" | "unexpected value type" => "msg.nobackup",
         "could not create a backup folder" | "could not create a backup file" | "backup copy failed" => "msg.backupfailed",
         "nostarttype" => "msg.nostarttype",

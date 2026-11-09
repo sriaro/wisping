@@ -84,8 +84,6 @@ pub trait Renderer {
 
     type NativeTexture;
 
-    type ExternalTexture;
-
     type RenderOutput;
 
     type CommandBuffer;
@@ -108,12 +106,6 @@ pub trait Renderer {
         info: ImageInfo,
     ) -> Result<Self::Image, ErrorKind>;
 
-    fn create_image_from_external_texture(
-        &mut self,
-        native_texture: Self::ExternalTexture,
-        info: ImageInfo,
-    ) -> Result<Self::Image, ErrorKind>;
-
     fn update_image(&mut self, image: &mut Self::Image, data: ImageSource, x: usize, y: usize)
         -> Result<(), ErrorKind>;
 
@@ -125,10 +117,6 @@ pub trait Renderer {
     fn delete_image(&mut self, image: Self::Image, image_id: ImageId);
 
     fn screenshot(&mut self) -> Result<ImgVec<RGBA8>, ErrorKind>;
-}
-
-pub trait SurfacelessRenderer: Renderer {
-    fn render_surfaceless(&mut self, images: &mut ImageStore<Self::Image>, verts: &[Vertex], commands: Vec<Command>);
 }
 
 use bytemuck::{Pod, Zeroable};

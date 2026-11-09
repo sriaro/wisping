@@ -14,7 +14,7 @@ use super::fsx;
 const CV: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
 const CV_WOW: &str = "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone)]
 pub struct Program {
     pub name: String,
     pub publisher: String,

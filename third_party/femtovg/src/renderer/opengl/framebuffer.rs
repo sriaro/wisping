@@ -14,13 +14,6 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
-    pub fn from_external(context: &Rc<glow::Context>, fbo: <glow::Context as glow::HasContext>::Framebuffer) -> Self {
-        Self {
-            context: context.clone(),
-            fbo,
-            stencil_rbo: None,
-        }
-    }
     pub fn new(context: &Rc<glow::Context>, texture: &GlTexture) -> Result<Self, ErrorKind> {
         let fbo = unsafe { context.create_framebuffer().unwrap() };
         unsafe {

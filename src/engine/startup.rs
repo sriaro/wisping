@@ -40,7 +40,7 @@ fn approved(sub: &str) -> String {
     format!("{}\\Explorer\\StartupApproved\\{}", CV, sub)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum StartupKind {
     #[default]
     Run,
@@ -63,7 +63,7 @@ impl StartupKind {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct StartupEntry {
     pub publisher: String,
     pub system: bool,

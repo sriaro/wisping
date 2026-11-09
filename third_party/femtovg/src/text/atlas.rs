@@ -26,15 +26,6 @@ impl Atlas {
         (self.width, self.height)
     }
 
-    pub fn expand(&mut self, width: usize, height: usize) {
-        if width > self.width {
-            self.insert_node(self.nodes.len(), self.width, 0, width - self.width);
-        }
-
-        self.width = width;
-        self.height = height;
-    }
-
     pub fn reset(&mut self, width: usize, height: usize) {
         *self = Self::new(width, height);
     }

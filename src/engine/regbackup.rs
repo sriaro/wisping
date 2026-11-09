@@ -10,7 +10,7 @@ use super::{backups, fsx, registry::target, sys};
 
 pub(super) mod integrity;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub enum Hive {
     Machine,
     #[default]

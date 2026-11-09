@@ -15,7 +15,7 @@ const CV: &str = "SOFTWARE\\Microsoft\\Windows\\CurrentVersion";
 const TRAY_ICONS: &str = "Control Panel\\NotifyIconSettings";
 const MUI_PATH: &str = "Software\\Classes\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\MuiCache";
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RegIssue {
     pub hive: Hive,
     pub kind: String,

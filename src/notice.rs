@@ -77,7 +77,7 @@ struct Plan {
     buttons: Vec<Btn>,
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default)]
 struct View {
     hover: Option<usize>,
     press: Option<usize>,

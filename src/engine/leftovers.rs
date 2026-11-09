@@ -29,7 +29,7 @@ const DENY: &[&str] = &[
     "microsoft help", "system volume information", "recovery", "boot", "perflogs", "sentinel", "oracle", "java", "docker", "dockerdesktop",
 ];
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(PartialEq)]
 enum Rule {
     Data,
     Program,
@@ -41,7 +41,6 @@ struct Root {
     admin: bool,
 }
 
-#[derive(Clone, Debug)]
 pub struct Leftover {
     pub path: PathBuf,
     pub size: u64,
@@ -324,7 +323,7 @@ pub fn recycle(path: &Path) -> io::Result<()> {
     let gone = fsx::plain_exists(&path) != Some(true);
     drop(held);
     if code != 0 || op.fAnyOperationsAborted.as_bool() || !gone {
-        return Err(io::Error::other("could not move the folder to the Recycle Bin"));
+        return Err(io::Error::other("norecycle"));
     }
     Ok(())
 }

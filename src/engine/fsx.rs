@@ -16,6 +16,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::core::PCWSTR;
 
+use super::lock::LockExt;
+
 const REPARSE_POINT: u32 = 0x400;
 const READ_ONLY: u32 = 0x1;
 const DELETE: u32 = 0x0001_0000;
@@ -117,7 +119,7 @@ pub fn direct_child(key: &str, prefix: &str) -> bool {
     key.strip_prefix(prefix).is_some_and(|rest| !rest.is_empty() && !rest.contains('\\'))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 pub enum Mask {
     Any,
     Exact(Box<[u8]>),
@@ -725,7 +727,7 @@ impl PinnedDir {
 
     pub fn update_file(&self, name: &OsStr, update: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
         static WRITERS: Mutex<()> = Mutex::new(());
-        let _writer = WRITERS.lock().map_err(|_| io::Error::other("A data-file write was interrupted."))?;
+        let _writer = WRITERS.locked();
         child_name(name)?;
         let mut file = OpenOptions::new().read(true).write(true).create(true).share_mode(SHARE_READ)
             .custom_flags(OPEN_REPARSE_POINT).open(self.path.join(name))?;
@@ -866,7 +868,6 @@ impl Fence {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Removal {
     Removed(u64),
     Kept,

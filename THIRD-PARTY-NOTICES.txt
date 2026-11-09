@@ -517,7 +517,7 @@ profiling 1.0.18
 profiling-procmacros 1.0.18
     licence: MIT OR Apache-2.0
     source:  https://github.com/aclysma/profiling
-pulldown-cmark 0.13.5
+pulldown-cmark 0.13.6
     licence: MIT
     source:  https://github.com/raphlinus/pulldown-cmark
 pulp 0.22.3
@@ -8679,7 +8679,7 @@ DEALINGS IN THE SOFTWARE.
 
 ------------------------------------------------------------------------------
 Applies to (LICENSE):
-  pulldown-cmark 0.13.5
+  pulldown-cmark 0.13.6
 ------------------------------------------------------------------------------
 
 The MIT License

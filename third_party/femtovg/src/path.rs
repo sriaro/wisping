@@ -1,6 +1,5 @@
 use std::{
     cell::{RefCell, RefMut},
-    f32::consts::PI,
     slice,
 };
 
@@ -95,10 +94,6 @@ impl Path {
         self.verbs.is_empty()
     }
 
-    pub fn set_distance_tolerance(&mut self, value: f32) {
-        self.dist_tol = value;
-    }
-
     pub fn verbs(&self) -> PathIter<'_> {
         PathIter {
             verbs: self.verbs.iter(),
@@ -121,10 +116,6 @@ impl Path {
         }
 
         RefMut::map(self.cache.borrow_mut(), |cache| &mut cache.as_mut().unwrap().1)
-    }
-
-    pub fn dashed(&self, dash: &[f32], offset: f32) -> Self {
-        self.dashed_with_tolerance(dash, offset, self.dist_tol)
     }
 
     pub(crate) fn dashed_with_tolerance(&self, dash: &[f32], offset: f32, tess_tol: f32) -> Self {
@@ -251,241 +242,6 @@ impl Path {
             Solidity::Solid => self.append(&[PackedVerb::Solid], &[]),
             Solidity::Hole => self.append(&[PackedVerb::Hole], &[]),
         }
-    }
-
-    pub fn arc(&mut self, cx: f32, cy: f32, r: f32, a0: f32, a1: f32, dir: Solidity) {
-        let cpos = Position { x: cx, y: cy };
-
-        let mut da = a1 - a0;
-
-        if dir == Solidity::Hole {
-            if da.abs() >= PI * 2.0 {
-                da = PI * 2.0;
-            } else {
-                while da < 0.0 {
-                    da += PI * 2.0
-                }
-            }
-        } else if da.abs() >= PI * 2.0 {
-            da = -PI * 2.0;
-        } else {
-            while da > 0.0 {
-                da -= PI * 2.0
-            }
-        }
-
-        let ndivs = ((da.abs() / (PI * 0.5) + 0.5) as i32).clamp(1, 5);
-        let hda = (da / ndivs as f32) / 2.0;
-        let mut kappa = (4.0 / 3.0 * (hda / 2.0).tan()).abs();
-
-        let mut commands = Vec::with_capacity(ndivs as usize);
-        let mut coords = Vec::with_capacity(ndivs as usize);
-
-        if dir == Solidity::Solid {
-            kappa = -kappa;
-        }
-
-        let (mut ppos, mut ptanpos) = (Position { x: 0.0, y: 0.0 }, Vector::zero());
-
-        for i in 0..=ndivs {
-            let a = a0 + da * (i as f32 / ndivs as f32);
-            let dpos = Vector::from_angle(a);
-            let pos = cpos + dpos * r;
-            let tanpos = -dpos.orthogonal() * r * kappa;
-
-            if i == 0 {
-                let first_move = if self.verbs.is_empty() {
-                    PackedVerb::MoveTo
-                } else {
-                    PackedVerb::LineTo
-                };
-
-                commands.push(first_move);
-                coords.extend_from_slice(&[pos]);
-            } else {
-                commands.push(PackedVerb::BezierTo);
-                let pos1 = ppos + ptanpos;
-                let pos2 = pos - tanpos;
-                coords.extend_from_slice(&[pos1, pos2, pos]);
-            }
-
-            ppos = pos;
-            ptanpos = tanpos;
-        }
-
-        self.append(&commands, &coords);
-    }
-
-    pub fn arc_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, radius: f32) {
-        if self.verbs.is_empty() {
-            return;
-        }
-
-        let pos0 = self.last_pos;
-        let pos1 = Position { x: x1, y: y1 };
-        let pos2 = Position { x: x2, y: y2 };
-
-        if Position::equals(pos0, pos1, self.dist_tol)
-            || Position::equals(pos1, pos2, self.dist_tol)
-            || Position::segment_distance(pos1, pos0, pos2) < self.dist_tol * self.dist_tol
-            || radius < self.dist_tol
-        {
-            return self.line_to(pos1.x, pos1.y);
-        }
-
-        let mut dpos0 = pos0 - pos1;
-        let mut dpos1 = pos2 - pos1;
-
-        dpos0.normalize();
-        dpos1.normalize();
-
-        let a = dpos0.dot(dpos1).acos();
-        let d = radius / (a / 2.0).tan();
-
-        if d > 10000.0 {
-            return self.line_to(pos1.x, pos1.y);
-        }
-
-        let (cpos, a0, a1, dir);
-
-        if dpos0.cross(dpos1) > 0.0 {
-            cpos = pos1 + dpos0 * d + dpos0.orthogonal() * radius;
-            a0 = dpos0.angle();
-            a1 = (-dpos1).angle();
-            dir = Solidity::Hole;
-        } else {
-            cpos = pos1 + dpos0 * d - dpos0.orthogonal() * radius;
-            a0 = (-dpos0).angle();
-            a1 = dpos1.angle();
-            dir = Solidity::Solid;
-        }
-
-        self.arc(cpos.x, cpos.y, radius, a0 + PI / 2.0, a1 + PI / 2.0, dir);
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn svg_arc_to(&mut self, rx: f32, ry: f32, x_axis_rotation: f32, large_arc: bool, sweep: bool, x: f32, y: f32) {
-        if !rx.is_finite() || !ry.is_finite() || !x_axis_rotation.is_finite() || !x.is_finite() || !y.is_finite() {
-            return;
-        }
-
-        let start = if self.verbs.is_empty() {
-            let origin = Position { x: 0.0, y: 0.0 };
-            self.move_to(origin.x, origin.y);
-            origin
-        } else {
-            self.last_pos
-        };
-        let end = Position { x, y };
-
-        if start.x == end.x && start.y == end.y {
-            return;
-        }
-
-        let mut rx = f64::from(rx).abs();
-        let mut ry = f64::from(ry).abs();
-        if rx == 0.0 || ry == 0.0 {
-            self.line_to(end.x, end.y);
-            return;
-        }
-
-        let (sin_phi, cos_phi) = f64::from(x_axis_rotation).sin_cos();
-
-        let dx2 = (f64::from(start.x) - f64::from(end.x)) * 0.5;
-        let dy2 = (f64::from(start.y) - f64::from(end.y)) * 0.5;
-        let x1p = cos_phi * dx2 + sin_phi * dy2;
-        let y1p = -sin_phi * dx2 + cos_phi * dy2;
-
-        let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
-        if lambda > 1.0 {
-            let s = lambda.sqrt();
-            rx *= s;
-            ry *= s;
-        }
-
-        let rx2 = rx * rx;
-        let ry2 = ry * ry;
-        let x1p2 = x1p * x1p;
-        let y1p2 = y1p * y1p;
-        let numerator = (rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2).max(0.0);
-        let denominator = rx2 * y1p2 + ry2 * x1p2;
-        let mut coef = (numerator / denominator).sqrt();
-        if large_arc == sweep {
-            coef = -coef;
-        }
-        let cxp = coef * (rx * y1p / ry);
-        let cyp = coef * -(ry * x1p / rx);
-
-        let cx = cos_phi * cxp - sin_phi * cyp + (f64::from(start.x) + f64::from(end.x)) * 0.5;
-        let cy = sin_phi * cxp + cos_phi * cyp + (f64::from(start.y) + f64::from(end.y)) * 0.5;
-
-        let ux = (x1p - cxp) / rx;
-        let uy = (y1p - cyp) / ry;
-        let vx = (-x1p - cxp) / rx;
-        let vy = (-y1p - cyp) / ry;
-
-        let theta1 = svg_arc_angle(1.0, 0.0, ux, uy);
-        let mut delta = svg_arc_angle(ux, uy, vx, vy);
-
-        if !sweep && delta > 0.0 {
-            delta -= std::f64::consts::PI * 2.0;
-        } else if sweep && delta < 0.0 {
-            delta += std::f64::consts::PI * 2.0;
-        }
-
-        const MAX_SEGMENTS: usize = 8;
-        let ndivs = ((delta.abs() / (std::f64::consts::PI * 0.5)).ceil() as usize).clamp(1, MAX_SEGMENTS);
-        let seg = delta / ndivs as f64;
-        let alpha = 4.0 / 3.0 * (seg * 0.25).tan();
-
-        let mut coords = [Position { x: 0.0, y: 0.0 }; MAX_SEGMENTS * 3];
-
-        let point = |t: f64| -> (f64, f64) {
-            let (sin_t, cos_t) = t.sin_cos();
-            (
-                cx + rx * cos_phi * cos_t - ry * sin_phi * sin_t,
-                cy + rx * sin_phi * cos_t + ry * cos_phi * sin_t,
-            )
-        };
-        let derivative = |t: f64| -> (f64, f64) {
-            let (sin_t, cos_t) = t.sin_cos();
-            (
-                -rx * cos_phi * sin_t - ry * sin_phi * cos_t,
-                -rx * sin_phi * sin_t + ry * cos_phi * cos_t,
-            )
-        };
-        let to_position = |p: (f64, f64)| Position {
-            x: p.0 as f32,
-            y: p.1 as f32,
-        };
-
-        for i in 0..ndivs {
-            let t1 = theta1 + seg * i as f64;
-            let t2 = t1 + seg;
-            let p1 = point(t1);
-            let p2 = point(t2);
-            let d1 = derivative(t1);
-            let d2 = derivative(t2);
-            let c1 = (p1.0 + d1.0 * alpha, p1.1 + d1.1 * alpha);
-            let c2 = (p2.0 - d2.0 * alpha, p2.1 - d2.1 * alpha);
-
-            coords[i * 3] = to_position(c1);
-            coords[i * 3 + 1] = to_position(c2);
-            coords[i * 3 + 2] = to_position(p2);
-        }
-        let coords = &mut coords[..ndivs * 3];
-
-        coords[ndivs * 3 - 1] = end;
-
-        if coords
-            .iter()
-            .any(|position| !position.x.is_finite() || !position.y.is_finite())
-        {
-            self.line_to(end.x, end.y);
-            return;
-        }
-
-        self.append(&[PackedVerb::BezierTo; MAX_SEGMENTS][..ndivs], coords);
     }
 
     pub fn rect(&mut self, x: f32, y: f32, w: f32, h: f32) {
@@ -752,15 +508,6 @@ impl<'a> DashCursor<'a> {
             self.drawing = self.index % 2 == 0;
         }
     }
-}
-
-fn svg_arc_angle(ux: f64, uy: f64, vx: f64, vy: f64) -> f64 {
-    let dot = ux * vx + uy * vy;
-    let len = (ux * ux + uy * uy).sqrt() * (vx * vx + vy * vy).sqrt();
-    let mut cos = if len == 0.0 { 0.0 } else { dot / len };
-    cos = cos.clamp(-1.0, 1.0);
-    let sign = if (ux * vy - uy * vx) < 0.0 { -1.0 } else { 1.0 };
-    sign * cos.acos()
 }
 
 fn normalize_dash_pattern(dash: &[f32]) -> Vec<f32> {

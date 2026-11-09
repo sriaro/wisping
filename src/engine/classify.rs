@@ -1,6 +1,6 @@
 use super::startup::{StartupEntry, StartupKind};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy)]
 pub enum Role {
     Windows,
     Security,
@@ -11,7 +11,7 @@ pub enum Role {
     App,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum Advice {
     Safe,
     Caution,

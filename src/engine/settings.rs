@@ -13,7 +13,6 @@ static LOW_DISK: AtomicBool = AtomicBool::new(false);
 static HISTORY: AtomicBool = AtomicBool::new(false);
 static LANG: AtomicU8 = AtomicU8::new(0);
 
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct WindowState {
     pub page: i32,
     pub width: i32,

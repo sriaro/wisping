@@ -172,33 +172,6 @@ impl Params {
                     }
                 }
             }
-            &PaintFlavor::BoxGradient {
-                pos: Position { x, y },
-                width,
-                height,
-                radius,
-                feather,
-                colors,
-            } => {
-                let mut transform = Transform2D::translation(x + width * 0.5, y + height * 0.5);
-                transform *= *global_transform;
-                inv_transform = transform.inverse();
-
-                params.extent[0] = width * 0.5;
-                params.extent[1] = height * 0.5;
-                params.radius = *radius;
-                params.feather = *feather;
-                match colors {
-                    GradientColors::TwoStop { start_color, end_color } => {
-                        params.inner_col = start_color.premultiplied().to_array();
-                        params.outer_col = end_color.premultiplied().to_array();
-                        params.shader_type = ShaderType::FillGradient;
-                    }
-                    GradientColors::MultiStop { .. } => {
-                        params.shader_type = ShaderType::FillImageGradient;
-                    }
-                }
-            }
             &PaintFlavor::RadialGradient {
                 center: Position { x: cx, y: cy },
                 in_radius: (in_rx, in_ry),

@@ -14,7 +14,7 @@ use crate::{
 
 use glow::HasContext;
 
-use super::{Command, CommandType, Params, RenderTarget, Renderer, ShaderType, SurfacelessRenderer};
+use super::{Command, CommandType, Params, RenderTarget, Renderer, ShaderType};
 
 mod program;
 use program::MainProgram;
@@ -47,16 +47,6 @@ pub struct OpenGl {
 }
 
 impl OpenGl {
-    pub unsafe fn new_from_function<F>(load_fn: F) -> Result<Self, ErrorKind>
-    where
-        F: FnMut(&str) -> *const c_void,
-    {
-        let context = glow::Context::from_loader_function(load_fn);
-        let version = context.get_parameter_string(glow::VERSION);
-        let is_opengles_2_0 = version.starts_with("OpenGL ES 2.");
-        Self::new_from_context(context, is_opengles_2_0)
-    }
-
     pub unsafe fn new_from_function_cstr<F>(load_fn: F) -> Result<Self, ErrorKind>
     where
         F: FnMut(&std::ffi::CStr) -> *const c_void,
@@ -172,10 +162,6 @@ impl OpenGl {
         }
 
         Ok(opengl)
-    }
-
-    pub fn is_opengles(&self) -> bool {
-        self.is_opengles_2_0
     }
 
     fn gl_factor(factor: BlendFactor) -> u32 {
@@ -472,13 +458,6 @@ impl OpenGl {
         }
     }
 
-    pub fn set_screen_target(&mut self, framebuffer_object: Option<<glow::Context as glow::HasContext>::Framebuffer>) {
-        match framebuffer_object {
-            Some(fbo_id) => self.screen_target = Some(Framebuffer::from_external(&self.context, fbo_id)),
-            None => self.screen_target = None,
-        }
-    }
-
     fn render_filtered_image(
         &mut self,
         images: &mut ImageStore<GlTexture>,
@@ -488,56 +467,7 @@ impl OpenGl {
     ) {
         match filter {
             ImageFilter::GaussianBlur { sigma } => self.render_gaussian_blur(images, cmd, target_image, sigma),
-            ImageFilter::ColorMatrix { matrix } => self.render_color_matrix(images, cmd, target_image, matrix),
         }
-    }
-
-    fn render_color_matrix(
-        &mut self,
-        images: &mut ImageStore<GlTexture>,
-        cmd: Command,
-        target_image: ImageId,
-        matrix: [f32; 20],
-    ) {
-        let original_render_target = self.current_render_target;
-        let source_image_info = images.get(cmd.image.unwrap()).unwrap().info();
-
-        let image_paint = crate::Paint::image(
-            cmd.image.unwrap(),
-            0.,
-            0.,
-            source_image_info.width() as _,
-            source_image_info.height() as _,
-            0.,
-            1.,
-        );
-        let mut params = Params::new(
-            images,
-            &Transform2D::default(),
-            &image_paint.flavor,
-            &GlyphTexture::default(),
-            &Scissor::default(),
-            0.,
-            0.,
-            0.,
-        );
-        params.shader_type = ShaderType::FilterImageColorMatrix;
-        params.scissor_mat.copy_from_slice(&matrix[..12]);
-        params.paint_mat[..8].copy_from_slice(&matrix[12..20]);
-
-        self.set_target(images, RenderTarget::Image(target_image));
-        self.main_program().set_view(self.view);
-        self.clear_rect(
-            0,
-            0,
-            source_image_info.width() as _,
-            source_image_info.height() as _,
-            Color::rgbaf(0., 0., 0., 0.),
-        );
-        self.triangles(images, &cmd, &params);
-
-        self.set_target(images, original_render_target);
-        self.main_program().set_view(self.view);
     }
 
     fn render_gaussian_blur(
@@ -660,7 +590,6 @@ impl OpenGl {
 impl Renderer for OpenGl {
     type Image = GlTexture;
     type NativeTexture = <glow::Context as glow::HasContext>::Texture;
-    type ExternalTexture = <glow::Context as glow::HasContext>::Texture;
     type RenderOutput = ();
     type CommandBuffer = ();
 
@@ -790,14 +719,6 @@ impl Renderer for OpenGl {
         Ok(Self::Image::new_from_native_texture(native_texture, info, false))
     }
 
-    fn create_image_from_external_texture(
-        &mut self,
-        native_texture: Self::ExternalTexture,
-        info: ImageInfo,
-    ) -> Result<Self::Image, ErrorKind> {
-        Ok(Self::Image::new_from_native_texture(native_texture, info, true))
-    }
-
     fn update_image(
         &mut self,
         image: &mut Self::Image,
@@ -850,12 +771,6 @@ impl Renderer for OpenGl {
         }
 
         Ok(ImgVec::new(flipped, w, h))
-    }
-}
-
-impl SurfacelessRenderer for OpenGl {
-    fn render_surfaceless(&mut self, images: &mut ImageStore<Self::Image>, verts: &[Vertex], commands: Vec<Command>) {
-        self.render((), images, verts, commands)
     }
 }
 

@@ -51,23 +51,6 @@ impl Position {
     pub(crate) fn equals(p1: Self, p2: Self, tol: f32) -> bool {
         (p2 - p1).mag2() < tol * tol
     }
-
-    pub(crate) fn segment_distance(pos: Self, ppos: Self, qpos: Self) -> f32 {
-        let pq = qpos - ppos;
-        let dpos = pos - ppos;
-        let d = pq.mag2();
-        let mut t = pq.dot(dpos);
-
-        if d > 0.0 {
-            t /= d;
-        }
-
-        t = t.clamp(0.0, 1.0);
-
-        let dpos = (ppos - pos) + pq * t;
-
-        dpos.mag2()
-    }
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -77,10 +60,6 @@ pub struct Vector {
 }
 
 impl Vector {
-    pub fn zero() -> Self {
-        Self { x: 0.0, y: 0.0 }
-    }
-
     pub fn x(x: f32) -> Self {
         Self { x, y: 0.0 }
     }
@@ -246,34 +225,9 @@ impl Transform2D {
         *y *= sy;
     }
 
-    pub fn skew_x(&mut self, a: f32) {
-        let tan = a.tan();
-
-        let Self([a, b, c, d, x, y]) = self;
-
-        *a += *b * tan;
-        *c += *d * tan;
-        *x += *y * tan;
-    }
-
-    pub fn skew_y(&mut self, a: f32) {
-        let tan = a.tan();
-
-        let Self([a, b, c, d, x, y]) = self;
-
-        *b += *a * tan;
-        *d += *c * tan;
-        *y += *x * tan;
-    }
-
     #[inline]
     pub fn premultiply(&mut self, other: &Self) {
         *self = *other * *self;
-    }
-
-    #[inline]
-    pub fn invert(&mut self) {
-        *self = self.inverse()
     }
 
     pub fn inverse(&self) -> Self {

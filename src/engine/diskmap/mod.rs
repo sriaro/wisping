@@ -21,14 +21,14 @@ const CHUNK_BITS: u32 = 20;
 const CHUNK: usize = 1 << CHUNK_BITS;
 const MAX_CHUNKS: usize = 1 << (32 - CHUNK_BITS);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum Kind {
     Dir,
     File,
     Small,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct Node {
     pub size: u64,
     pub off: u32,
