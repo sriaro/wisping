@@ -232,7 +232,7 @@ export component MainWindow inherits Window {
     min-height: 560px;
     preferred-width: 1080px;
     preferred-height: 740px;
-    background: AppState.glass-enabled ? transparent : Theme.bg-base;
+    background: transparent;
     property <float> veil: Theme.veil-target;
     animate veil { duration: Theme.veil-ms * 1ms; easing: spring(0); }
     changed veil => {

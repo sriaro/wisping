@@ -11,9 +11,49 @@ use crate::{BackupsState, DataItem, MainWindow};
 static SHOWN_TAB: AtomicI32 = AtomicI32::new(-1);
 static BUSY: AtomicBool = AtomicBool::new(false);
 static LIST_GEN: AtomicU32 = AtomicU32::new(0);
+static FACTS_GEN: AtomicU32 = AtomicU32::new(0);
+
+struct Facts {
+    history: Vec<crate::engine::history::Entry>,
+    freed: u64,
+    backups: usize,
+    logged: bool,
+}
 
 thread_local! {
     static LISTED: RefCell<Option<Vec<DataItem>>> = const { RefCell::new(None) };
+    static FACTS: RefCell<Option<Facts>> = const { RefCell::new(None) };
+}
+
+fn facts() -> Facts {
+    let (history, freed) = crate::engine::history::load();
+    Facts { history, freed, backups: backups::count(), logged: crate::engine::fsx::plain_file(&data::log_path()) == Some(true) }
+}
+
+fn known<R>(read: impl FnOnce(&Facts) -> R) -> R {
+    FACTS.with(|f| read(f.borrow_mut().get_or_insert_with(facts)))
+}
+
+fn forget() {
+    FACTS_GEN.fetch_add(1, Ordering::SeqCst);
+    FACTS.with(|f| *f.borrow_mut() = None);
+}
+
+fn revalidate(ui: &MainWindow) {
+    let generation = FACTS_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    let weak = ui.as_weak();
+    crate::engine::pool::spawn(move || {
+        let fresh = facts();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            if FACTS_GEN.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            FACTS.with(|f| *f.borrow_mut() = Some(fresh));
+            if ui.global::<BackupsState>().get_tab() != 0 {
+                push(&ui);
+            }
+        });
+    });
 }
 
 fn row(id: &str, title: String, desc: String, icon: &str, tint: i32) -> DataItem {
@@ -39,12 +79,11 @@ fn backup_rows() -> Vec<DataItem> {
         .collect()
 }
 
-fn history_rows() -> Vec<DataItem> {
-    crate::engine::history::list()
-        .into_iter()
+fn history_rows(list: &[crate::engine::history::Entry]) -> Vec<DataItem> {
+    list.iter()
         .map(|e| {
             if e.kind == "fix" {
-                let mut r = row("h", e.when, i18n::fmt("history.fix.desc", &[&e.a.to_string(), &e.b.to_string()]), "wrench", 3);
+                let mut r = row("h", e.when.clone(), i18n::fmt("history.fix.desc", &[&e.a.to_string(), &e.b.to_string()]), "wrench", 3);
                 r.state = i18n::get("history.fix").into();
                 r
             } else {
@@ -53,7 +92,7 @@ fn history_rows() -> Vec<DataItem> {
                     desc.push_str("  ·  ");
                     desc.push_str(&i18n::fmt("history.failed", &[&data::format_size(e.b)]));
                 }
-                let mut r = row("h", e.when, desc, "trash", 0);
+                let mut r = row("h", e.when.clone(), desc, "trash", 0);
                 r.state = data::format_size(e.a).into();
                 r
             }
@@ -61,7 +100,7 @@ fn history_rows() -> Vec<DataItem> {
         .collect()
 }
 
-fn data_rows() -> Vec<DataItem> {
+fn data_rows(facts: &Facts) -> Vec<DataItem> {
     let mut log = row("log", i18n::get("backups.log.title"), i18n::get("backups.log.desc"), "file", 5);
     log.toggle = true;
     log.on = settings::log_on();
@@ -82,14 +121,13 @@ fn data_rows() -> Vec<DataItem> {
     if !data::is_custom() {
         folder.state = i18n::get("backups.folder.default").into();
     }
-    let count = backups::count();
+    let count = facts.backups;
     let mut clear = row("clear", i18n::get("backups.clear.title"), i18n::fmt("backups.clear.desc", &[&count.to_string()]), "trash", 6);
     clear.button = i18n::get("backups.clear.btn").into();
     clear.enabled = count > 0;
-    let hist = crate::engine::history::list().len();
     let mut clearhist = row("clearhist", i18n::get("backups.clearhist.title"), i18n::get("backups.clearhist.desc"), "trash", 6);
     clearhist.button = i18n::get("backups.clearhist.btn").into();
-    clearhist.enabled = hist > 0;
+    clearhist.enabled = !facts.history.is_empty();
     let mut rows = vec![log, history, remember, restorepoint, lowdisk, folder];
     if data::is_custom() {
         let mut reset = row("reset", i18n::get("backups.reset.title"), data::default_root().display().to_string(), "refresh", 1);
@@ -100,7 +138,7 @@ fn data_rows() -> Vec<DataItem> {
     open.button = i18n::get("backups.open.btn").into();
     let mut view = row("viewlog", i18n::get("backups.viewlog.title"), i18n::get("backups.viewlog.desc"), "file", 6);
     view.button = i18n::get("backups.open.btn").into();
-    view.enabled = crate::engine::fsx::plain_file(&data::log_path()) == Some(true);
+    view.enabled = facts.logged;
     if !view.enabled {
         view.desc = i18n::get("backups.viewlog.none").into();
     }
@@ -121,14 +159,14 @@ fn push(ui: &MainWindow) {
     ])));
     let sub = match tab {
         0 => i18n::get("backups.sub.list"),
-        1 => i18n::fmt("backups.sub.history", &[&data::format_size(crate::engine::history::total_freed())]),
+        1 => i18n::fmt("backups.sub.history", &[&data::format_size(known(|f| f.freed))]),
         _ => i18n::get("backups.sub.data"),
     };
     st.set_sub(sub.into());
     let keep = SHOWN_TAB.swap(tab, Ordering::SeqCst) == tab;
     if tab != 0 {
         st.set_empty(i18n::get(if tab != 1 { "backups.empty" } else if settings::history_on() { "history.empty" } else { "history.off" }).into());
-        show_items(&st, if tab == 1 { history_rows() } else { data_rows() }, keep);
+        show_items(&st, known(|f| if tab == 1 { history_rows(&f.history) } else { data_rows(f) }), keep);
         return;
     }
     let listed = LISTED.with(|l| l.borrow().clone());
@@ -184,6 +222,7 @@ fn in_background(c: &Ctx, reload: bool, work: impl FnOnce() -> Result<String, St
         let _reset = crate::app::panic_reset(&weak, |ui| {
             BUSY.store(false, Ordering::SeqCst);
             ui.global::<BackupsState>().set_busy(false);
+            forget();
             push(ui);
         });
         let result = work();
@@ -199,6 +238,7 @@ fn in_background(c: &Ctx, reload: bool, work: impl FnOnce() -> Result<String, St
                 Ok(text) => toast(&c, text),
                 Err(e) => show_error(&c, e),
             }
+            forget();
             push(&ui);
         });
     });
@@ -222,10 +262,11 @@ fn act(c: &Ctx, id: &str) {
         }
         "clearhist" => {
             crate::engine::history::clear();
+            forget();
             toast(c, i18n::get("backups.clearhist.done"));
         }
         "clear" => {
-            let count = backups::count().to_string();
+            let count = known(|f| f.backups).to_string();
             let c2 = c.clone();
             confirm(
                 c,
@@ -266,6 +307,7 @@ pub fn on_show(c: &Ctx) {
     SHOWN_TAB.store(-1, Ordering::SeqCst);
     if let Some(ui) = c.weak.upgrade() {
         push(&ui);
+        revalidate(&ui);
     }
 }
 

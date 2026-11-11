@@ -47,6 +47,7 @@ fn run_app() -> Result<(), slint::PlatformError> {
     app::style_window_later(&ui);
     let result = ui.run();
     app::save_state(&ui);
+    engine::data::flush();
     result
 }
 

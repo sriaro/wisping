@@ -41,9 +41,8 @@ varying vec2 fpos;
  #define SHADER_TYPE_FilterImage 4
  #define SHADER_TYPE_FillColor 5
  #define SHADER_TYPE_TextureCopyUnclipped 6
- #define SHADER_TYPE_FillGradientConic 8
- #define SHADER_TYPE_FillImageGradientConic 9
- #define SHADER_TYPE_FilterImageColorMatrix 10
+ #define SHADER_TYPE_FillGradientConic 7
+ #define SHADER_TYPE_FillImageGradientConic 8
 
 float sdroundrect(vec2 pt, vec2 ext, float rad) {
     vec2 ext2 = ext - vec2(rad,rad);
@@ -154,20 +153,6 @@ vec4 renderFilteredImage() {
     return color;
 }
 
-vec4 renderColorMatrix() {
-    vec4 c = texture2D(tex, fpos.xy / extent);
-    if (c.a > 0.0) {
-        c.rgb /= c.a;
-    }
-    float r = frag[0].x * c.r + frag[0].y * c.g + frag[0].z * c.b + frag[0].w * c.a + frag[1].x;
-    float g = frag[1].y * c.r + frag[1].z * c.g + frag[1].w * c.b + frag[2].x * c.a + frag[2].y;
-    float b = frag[2].z * c.r + frag[2].w * c.g + frag[3].x * c.b + frag[3].y * c.a + frag[3].z;
-    float a = frag[3].w * c.r + frag[4].x * c.g + frag[4].y * c.b + frag[4].z * c.a + frag[4].w;
-    vec4 outc = clamp(vec4(r, g, b, a), 0.0, 1.0);
-    outc.rgb *= outc.a;
-    return outc;
-}
-
 void main(void) {
     vec4 result;
 
@@ -200,8 +185,6 @@ void main(void) {
     result = renderGradientConic();
 #elif SELECT_SHADER == SHADER_TYPE_FillImageGradientConic
     result = renderImageGradientConic();
-#elif SELECT_SHADER == SHADER_TYPE_FilterImageColorMatrix
-    result = renderColorMatrix();
 #else
 #error A shader variant must be selected with the SELECT_SHADER pre-processor variable
 #endif
@@ -221,7 +204,7 @@ void main(void) {
     mask *= scissor;
     result *= mask;
 #else
-#if SELECT_SHADER != SHADER_TYPE_Stencil && SELECT_SHADER != SHADER_TYPE_FilterImage && SELECT_SHADER != SHADER_TYPE_FilterImageColorMatrix
+#if SELECT_SHADER != SHADER_TYPE_Stencil && SELECT_SHADER != SHADER_TYPE_FilterImage
         result *= strokeAlpha * scissor;
 #endif
 #endif

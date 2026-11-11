@@ -40,6 +40,7 @@ const BTN_GAP: f32 = 8.0;
 const FOOT_H: f32 = 80.0;
 const HEAD_LINES: usize = 3;
 const BODY_LINES: usize = 12;
+const SHOWN_CHARS: usize = 4096;
 const ANIM_MS: f32 = 160.0;
 const RISE: f32 = 8.0;
 const ANIM_TIMER: usize = 1;
@@ -352,7 +353,8 @@ fn plan(heading: &str, text: &str, f: &Fonts, s: f32, copied: bool) -> Plan {
     y = y.max(badge[1] + badge[3]) + (GAP * s).round();
     let body_lh = f.line_height(false).round();
     let measure_body = |t: &str| f.advance(false, t);
-    for t in cap(&measure_body, wrap(&measure_body, text, col, BODY_LINES + 1), BODY_LINES, col) {
+    let shown: String = text.chars().take(SHOWN_CHARS).collect();
+    for t in cap(&measure_body, wrap(&measure_body, &shown, col, BODY_LINES + 1), BODY_LINES, col) {
         lines.push(Line { x: x0, y, text: t, head: false });
         y += body_lh;
     }

@@ -573,9 +573,8 @@ pub fn reload_startups(c: &Ctx, done: Option<String>) {
 }
 
 pub fn detect_dark() -> bool {
-    if settings::remember_on()
-        && let Some(v) = data::read_setting("theme.txt") {
-            return v == "dark";
+    if let Some(dark) = settings::saved_theme() {
+        return dark;
     }
     match Hive::User.open("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize") {
         Ok(key) => crate::engine::regbackup::read_dword(&key, "AppsUseLightTheme") == Some(0),
@@ -682,7 +681,6 @@ pub fn install_text(ui: &MainWindow) {
 }
 
 pub fn setup(ui: &MainWindow) {
-    crate::engine::settings::load();
     *WINDOW.locked() = Some((ui.as_weak(), std::thread::current().id()));
     install_window_controls(ui);
     install_text(ui);
@@ -692,7 +690,6 @@ pub fn setup(ui: &MainWindow) {
     let keep = data::read_setting("keep-recent.txt").map(|v| v != "all").unwrap_or(true);
     cleaner::set_keep_recent(keep);
     ui.global::<AppState>().set_keep_recent(keep);
-    ui.global::<AppState>().set_glass_enabled(!std::env::args().any(|a| a == "--opaque"));
 
     let admin = sys::is_admin();
     ui.global::<AppState>().set_is_admin(admin);
@@ -928,7 +925,7 @@ pub fn setup(ui: &MainWindow) {
         let c = ctx.clone();
         move |keep| {
             cleaner::set_keep_recent(keep);
-            data::write_setting("keep-recent.txt", if keep { "recent" } else { "all" });
+            data::write_later("keep-recent.txt", if keep { "recent" } else { "all" });
             let Some(ui) = c.weak.upgrade() else { return };
             ui.global::<AppState>().set_keep_recent(keep);
             let scanned = c.core.locked().targets.iter().any(|t| t.scanned);
@@ -957,9 +954,7 @@ pub fn setup(ui: &MainWindow) {
             let now = !ui.global::<Theme>().get_dark();
             crossfade(&ui, || {
                 ui.global::<Theme>().set_dark(now);
-                if settings::remember_on() {
-                    data::write_setting("theme.txt", if now { "dark" } else { "light" });
-                }
+                settings::save_theme(now);
                 if ui.global::<AppState>().get_glass_active() {
                     winui::set_dark(now);
                 }
@@ -1098,11 +1093,9 @@ pub fn style_window_later(ui: &MainWindow) {
         let Some(ui) = weak_style.upgrade() else { return };
         with_window(&ui, |w| w.set_undecorated_shadow(true));
         winui::round_corners();
-        if ui.global::<AppState>().get_glass_enabled() {
-            let ok = winui::apply_backdrop(ui.global::<Theme>().get_dark());
-            winui::strip_caption_buttons();
-            ui.global::<AppState>().set_glass_active(ok);
-        }
+        let ok = winui::apply_backdrop(ui.global::<Theme>().get_dark());
+        winui::strip_caption_buttons();
+        ui.global::<AppState>().set_glass_active(ok);
         REVEAL.with(|r| {
             let (_, _, done) = r.get();
             r.set((true, 0, done));

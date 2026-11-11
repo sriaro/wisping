@@ -9,9 +9,27 @@ use crate::engine::programs::{self, Program};
 use crate::i18n;
 use crate::{MainWindow, ProgItem, UninstallState};
 
+struct Row {
+    program: Program,
+    name: String,
+    publisher: String,
+    can_open: bool,
+}
+
+fn rows_of(list: Vec<Program>) -> Vec<Row> {
+    list.into_iter()
+        .map(|program| Row {
+            name: program.name.to_lowercase(),
+            publisher: program.publisher.to_lowercase(),
+            can_open: !program.location.is_empty() && fsx::plain_dir(std::path::Path::new(&program.location)) == Some(true),
+            program,
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct State {
-    all: Vec<Program>,
+    all: Vec<Row>,
     filter: String,
     sort: i32,
     loaded: bool,
@@ -30,28 +48,26 @@ fn push(ui: &MainWindow) {
     STATE.with(|s| {
         let s = s.borrow();
         let needle = s.filter.to_lowercase();
-        let mut rows: Vec<(usize, &Program)> = s
-            .all
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| needle.is_empty() || p.name.to_lowercase().contains(&needle) || p.publisher.to_lowercase().contains(&needle))
-            .collect();
+        let mut rows: Vec<(usize, &Row)> = s.all.iter().enumerate().filter(|(_, r)| needle.is_empty() || r.name.contains(&needle) || r.publisher.contains(&needle)).collect();
         match s.sort {
-            1 => rows.sort_by(|a, b| b.1.size.cmp(&a.1.size).then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))),
-            2 => rows.sort_by(|a, b| b.1.date.cmp(&a.1.date).then_with(|| a.1.name.to_lowercase().cmp(&b.1.name.to_lowercase()))),
-            _ => rows.sort_by_key(|(_, p)| p.name.to_lowercase()),
+            1 => rows.sort_by(|a, b| b.1.program.size.cmp(&a.1.program.size).then_with(|| a.1.name.cmp(&b.1.name))),
+            2 => rows.sort_by(|a, b| b.1.program.date.cmp(&a.1.program.date).then_with(|| a.1.name.cmp(&b.1.name))),
+            _ => rows.sort_by(|a, b| a.1.name.cmp(&b.1.name)),
         }
-        let total: u64 = rows.iter().map(|(_, p)| p.size).sum();
+        let total: u64 = rows.iter().map(|(_, r)| r.program.size).sum();
         let items: Vec<ProgItem> = rows
             .iter()
-            .map(|(i, p)| ProgItem {
-                idx: *i as i32,
-                name: crate::views::ltr(&p.name).into(),
-                sub: crate::views::ltr(&[p.publisher.as_str(), p.version.as_str()].iter().filter(|t| !t.is_empty()).copied().collect::<Vec<_>>().join("  ·  ")).into(),
-                size: if p.size > 0 { data::format_size(p.size) } else { String::new() }.into(),
-                date: p.date.as_str().into(),
-                tint: tint_of(&p.name),
-                can_open: !p.location.is_empty() && fsx::plain_dir(std::path::Path::new(&p.location)) == Some(true),
+            .map(|(i, r)| {
+                let p = &r.program;
+                ProgItem {
+                    idx: *i as i32,
+                    name: crate::views::ltr(&p.name).into(),
+                    sub: crate::views::ltr(&[p.publisher.as_str(), p.version.as_str()].iter().filter(|t| !t.is_empty()).copied().collect::<Vec<_>>().join("  ·  ")).into(),
+                    size: if p.size > 0 { data::format_size(p.size) } else { String::new() }.into(),
+                    date: p.date.as_str().into(),
+                    tint: tint_of(&p.name),
+                    can_open: r.can_open,
+                }
             })
             .collect();
         let st = ui.global::<UninstallState>();
@@ -74,7 +90,7 @@ fn load(c: &Ctx) {
     let weak = c.weak.clone();
     crate::engine::pool::spawn(move || {
         let _reset = crate::app::panic_reset(&weak, |ui| ui.global::<UninstallState>().set_loading(false));
-        let list = programs::list();
+        let list = rows_of(programs::list());
         let _ = weak.upgrade_in_event_loop(move |ui| {
             crate::winui::trim_soon();
             STATE.with(|s| {
@@ -95,7 +111,7 @@ pub fn on_show(c: &Ctx) {
 }
 
 fn program_at(idx: i32) -> Option<Program> {
-    STATE.with(|s| s.borrow().all.get(idx as usize).cloned())
+    STATE.with(|s| s.borrow().all.get(idx as usize).map(|r| r.program.clone()))
 }
 
 pub fn install(c: &Ctx) {

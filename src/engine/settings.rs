@@ -1,9 +1,10 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
-use super::{data, fsx};
+use super::data;
 
 const FILE: &str = "settings.txt";
 const STATE: &str = "state.txt";
+const THEME: &str = "theme.txt";
 const CLEAN: &str = "clean.txt";
 
 static LOG: AtomicBool = AtomicBool::new(false);
@@ -91,8 +92,7 @@ fn save_flags() {
         history_on() as u8,
         lang_name(lang_choice())
     );
-    data::ensure_root();
-    let _ = fsx::write_file(&data::root().join(FILE), text.as_bytes());
+    data::write_later(FILE, &text);
 }
 
 pub fn set_log(on: bool) {
@@ -123,11 +123,23 @@ pub fn set_lang(code: u8) {
 pub fn set_remember(on: bool) {
     REMEMBER.store(on, Ordering::SeqCst);
     save_flags();
-    if !on
-        && let Ok(dir) = fsx::PinnedDir::open(&data::root()) {
-            let _ = dir.remove_file(STATE.as_ref());
-            let _ = dir.remove_file("theme.txt".as_ref());
+    if !on {
+        data::remove_later(STATE);
+        data::remove_later(THEME);
     }
+}
+
+pub fn save_theme(dark: bool) {
+    if remember_on() {
+        data::write_later(THEME, if dark { "dark" } else { "light" });
+    }
+}
+
+pub fn saved_theme() -> Option<bool> {
+    if !remember_on() {
+        return None;
+    }
+    data::read_setting(THEME).map(|value| value == "dark")
 }
 
 pub fn parse_state(text: &str) -> Option<WindowState> {
@@ -148,8 +160,7 @@ pub fn save_state(state: WindowState) {
         return;
     }
     let text = format!("page={}\r\nwidth={}\r\nheight={}\r\n", state.page, state.width, state.height);
-    data::ensure_root();
-    let _ = fsx::write_file(&data::root().join(STATE), text.as_bytes());
+    data::write_later(STATE, &text);
 }
 
 pub fn save_clean_list(ids: &[&str]) {

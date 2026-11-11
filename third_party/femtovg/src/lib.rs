@@ -454,12 +454,6 @@ where
         Ok(id)
     }
 
-    pub fn get_native_texture(&self, id: ImageId) -> Result<T::NativeTexture, ErrorKind> {
-        self.get_image(id)
-            .ok_or(ErrorKind::ImageIdNotFound)
-            .and_then(|image| self.renderer.get_native_texture(image))
-    }
-
     pub fn get_image(&self, id: ImageId) -> Option<&T::Image> {
         self.images.get(id)
     }

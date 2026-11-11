@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
@@ -16,13 +17,18 @@ struct Queue {
 }
 
 const MAX_WORKERS: usize = 32;
+pub const BULK_WORKERS: usize = MAX_WORKERS - 8;
+
+thread_local! {
+    static WORKER: Cell<bool> = const { Cell::new(false) };
+}
 
 static QUEUE: Mutex<Queue> = Mutex::new(Queue { jobs: VecDeque::new(), idle: 0, starting: 0, workers: 0 });
 static READY: Condvar = Condvar::new();
 
 fn push(job: Job) -> std::io::Result<()> {
     let mut q = QUEUE.locked();
-    if q.jobs.len() >= q.idle + q.starting && q.workers + q.starting < MAX_WORKERS {
+    if q.jobs.len() >= q.idle + q.starting && q.workers < MAX_WORKERS {
         q.starting += 1;
         if let Err(error) = std::thread::Builder::new().name("wisping-worker".into()).spawn(worker) {
             q.starting -= 1;
@@ -37,6 +43,7 @@ fn push(job: Job) -> std::io::Result<()> {
 }
 
 fn worker() {
+    WORKER.set(true);
     let mut q = QUEUE.locked();
     q.starting -= 1;
     loop {
@@ -74,6 +81,10 @@ impl<T> Slot<T> {
         self.ready.notify_all();
     }
 
+    fn ready(&self) -> Option<std::thread::Result<T>> {
+        self.value.locked().take()
+    }
+
     fn take(&self) -> std::thread::Result<T> {
         let mut value = self.value.locked();
         loop {
@@ -100,19 +111,45 @@ pub fn run<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Task<T>
     Task(slot)
 }
 
+struct Local {
+    pending: usize,
+    waiting: VecDeque<Job>,
+}
+
 struct ScopeState {
-    pending: Mutex<usize>,
+    local: Mutex<Local>,
     done: Condvar,
     lost: AtomicUsize,
+}
+
+impl ScopeState {
+    fn claim(&self) -> Option<Job> {
+        self.local.locked().waiting.pop_front()
+    }
+
+    fn help(&self) -> bool {
+        if !WORKER.get() {
+            return false;
+        }
+        let Some(job) = self.claim() else { return false };
+        assist(job);
+        true
+    }
+}
+
+fn assist(job: Job) {
+    let mode = super::cpu::mode();
+    job();
+    super::cpu::resume(mode);
 }
 
 struct Finish(Arc<ScopeState>);
 
 impl Drop for Finish {
     fn drop(&mut self) {
-        let mut pending = self.0.pending.locked();
-        *pending -= 1;
-        if *pending == 0 {
+        let mut local = self.0.local.locked();
+        local.pending -= 1;
+        if local.pending == 0 {
             self.0.done.notify_all();
         }
     }
@@ -149,9 +186,24 @@ impl<'scope> Scope<'scope, '_> {
             out.put(result);
         });
         let job: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'scope>, Job>(job) };
-        *self.state.pending.locked() += 1;
-        if let Err(e) = push(job) {
-            drop(Finish(self.state.clone()));
+        {
+            let mut local = self.state.local.locked();
+            local.pending += 1;
+            local.waiting.push_back(job);
+        }
+        self.state.done.notify_all();
+        let state = self.state.clone();
+        let ticket: Job = Box::new(move || {
+            let job = state.claim();
+            if let Some(job) = job {
+                job();
+            }
+        });
+        if let Err(e) = push(ticket) {
+            let unstarted = self.state.local.locked().waiting.pop_back();
+            if unstarted.is_some() {
+                drop(Finish(self.state.clone()));
+            }
             panic!("failed to spawn thread: {e}");
         }
         ScopedJoinHandle { slot, state: self.state.clone(), scope: PhantomData }
@@ -160,7 +212,14 @@ impl<'scope> Scope<'scope, '_> {
 
 impl<T> ScopedJoinHandle<'_, T> {
     pub fn join(self) -> std::thread::Result<T> {
-        let result = self.slot.take();
+        let result = loop {
+            if let Some(result) = self.slot.ready() {
+                break result;
+            }
+            if !self.state.help() {
+                break self.slot.take();
+            }
+        };
         if result.is_err() {
             self.state.lost.fetch_sub(1, Ordering::SeqCst);
         }
@@ -172,13 +231,22 @@ pub fn scope<'env, F, T>(f: F) -> T
 where
     F: for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> T,
 {
-    let scope = Scope { state: Arc::new(ScopeState { pending: Mutex::new(0), done: Condvar::new(), lost: AtomicUsize::new(0) }), scope: PhantomData, env: PhantomData };
+    let scope = Scope { state: Arc::new(ScopeState { local: Mutex::new(Local { pending: 0, waiting: VecDeque::new() }), done: Condvar::new(), lost: AtomicUsize::new(0) }), scope: PhantomData, env: PhantomData };
     let result = catch_unwind(AssertUnwindSafe(|| f(&scope)));
-    let mut pending = scope.state.pending.locked();
-    while *pending > 0 {
-        pending = scope.state.done.wait(pending).unwrap_or_else(PoisonError::into_inner);
+    let helper = WORKER.get();
+    let mut local = scope.state.local.locked();
+    while local.pending > 0 {
+        let job = if helper { local.waiting.pop_front() } else { None };
+        match job {
+            Some(job) => {
+                drop(local);
+                assist(job);
+                local = scope.state.local.locked();
+            }
+            None => local = scope.state.done.wait(local).unwrap_or_else(PoisonError::into_inner),
+        }
     }
-    drop(pending);
+    drop(local);
     match result {
         Err(payload) => resume_unwind(payload),
         Ok(_) if scope.state.lost.load(Ordering::SeqCst) > 0 => panic!("a scoped thread panicked"),

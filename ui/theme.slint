@@ -16,7 +16,6 @@ export global Theme {
     in-out property <float> page-a: 1;
     out property <bool> calm: quiet || settling;
 
-    out property <color> bg-base: #0b101b.mix(#e9eff8, night);
     out property <brush> bg-gradient: @linear-gradient(135deg, #111a2a.mix(#f5f9fe, night) 0%, #0b0f19.mix(#e6eef9, night) 55%, #151030.mix(#ede9fb, night) 100%);
     out property <brush> blob-a: @radial-gradient(circle, #19b8a626.mix(#38e0c434, night) 0%, #19b8a617.mix(#38e0c420, night) 22%, #19b8a60b.mix(#38e0c40f, night) 42%, #19b8a604.mix(#38e0c405, night) 62%, #19b8a601.mix(#38e0c401, night) 82%, #19b8a600.mix(#38e0c400, night) 100%);
     out property <brush> blob-b: @radial-gradient(circle, #2f5be026.mix(#3a62f030, night) 0%, #2f5be017.mix(#3a62f01d, night) 22%, #2f5be00b.mix(#3a62f00e, night) 42%, #2f5be004.mix(#3a62f005, night) 62%, #2f5be001.mix(#3a62f001, night) 82%, #2f5be000.mix(#3a62f000, night) 100%);
@@ -163,7 +162,6 @@ export global AppState {
     in-out property <int> page: 0;
     in-out property <bool> maximized: false;
     in-out property <bool> has-report: false;
-    in-out property <bool> glass-enabled: true;
     in-out property <bool> glass-active: false;
     in-out property <bool> keep-recent: true;
     in-out property <bool> busy: false;

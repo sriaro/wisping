@@ -2,9 +2,10 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use super::fsx;
+use super::lock::LockExt;
 use super::settings;
 use super::sys;
 
@@ -292,6 +293,7 @@ pub fn set_location(new: &Path) -> std::io::Result<()> {
     if inside(new, &current) || inside(&current, new) {
         return Err(std::io::Error::other("nested"));
     }
+    flush();
     let source = match fsx::PinnedDir::open(&current) {
         Ok(dir) => Some(dir),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -381,4 +383,47 @@ pub fn read_setting(name: &str) -> Option<String> {
 pub fn write_setting(name: &str, value: &str) {
     ensure_root();
     let _ = fsx::write_file(&root().join(name), value.as_bytes());
+}
+
+enum Change {
+    Write(Vec<u8>),
+    Remove,
+}
+
+static LATER: Mutex<Vec<(&'static str, Change)>> = Mutex::new(Vec::new());
+static WRITING: Mutex<()> = Mutex::new(());
+
+fn later(name: &'static str, change: Change) {
+    let mut queue = LATER.locked();
+    queue.retain(|(queued, _)| *queued != name);
+    queue.push((name, change));
+    drop(queue);
+    super::pool::spawn(flush);
+}
+
+pub fn write_later(name: &'static str, value: &str) {
+    later(name, Change::Write(value.as_bytes().to_vec()));
+}
+
+pub fn remove_later(name: &'static str) {
+    later(name, Change::Remove);
+}
+
+pub fn flush() {
+    let _turn = WRITING.locked();
+    let changes = std::mem::take(&mut *LATER.locked());
+    if changes.is_empty() {
+        return;
+    }
+    let root = ensure_root();
+    for (name, change) in changes {
+        match change {
+            Change::Write(bytes) => {
+                let _ = fsx::write_file(&root.join(name), &bytes);
+            }
+            Change::Remove => {
+                let _ = fsx::PinnedDir::open(&root).and_then(|dir| dir.remove_file(name.as_ref()));
+            }
+        }
+    }
 }

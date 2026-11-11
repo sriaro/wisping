@@ -369,7 +369,7 @@ pub fn scan(root: &Path, progress: &Progress) -> Option<Tree> {
         progress,
         linked: Mutex::new(HashSet::new()),
     };
-    let workers = (super::cleaner::worker_count() * 2).min(32);
+    let workers = (super::cleaner::worker_count() * 2).min(crate::engine::pool::BULK_WORKERS);
     crate::engine::pool::scope(|s| {
         for _ in 0..workers {
             s.spawn(|| {

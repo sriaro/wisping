@@ -109,11 +109,6 @@ pub trait Renderer {
     fn update_image(&mut self, image: &mut Self::Image, data: ImageSource, x: usize, y: usize)
         -> Result<(), ErrorKind>;
 
-    #[allow(unused_variables)]
-    fn get_native_texture(&self, image: &Self::Image) -> Result<Self::NativeTexture, ErrorKind> {
-        Err(ErrorKind::UnsupportedImageFormat)
-    }
-
     fn delete_image(&mut self, image: Self::Image, image_id: ImageId);
 
     fn screenshot(&mut self) -> Result<ImgVec<RGBA8>, ErrorKind>;
@@ -155,10 +150,8 @@ pub enum ShaderType {
     FilterImage,
     FillColor,
     TextureCopyUnclipped,
-    FillColorUnclipped,
     FillGradientConic,
     FillImageGradientConic,
-    FilterImageColorMatrix,
 }
 
 impl ShaderType {
@@ -171,10 +164,8 @@ impl ShaderType {
             Self::FilterImage => 4,
             Self::FillColor => 5,
             Self::TextureCopyUnclipped => 6,
-            Self::FillColorUnclipped => 7,
-            Self::FillGradientConic => 8,
-            Self::FillImageGradientConic => 9,
-            Self::FilterImageColorMatrix => 10,
+            Self::FillGradientConic => 7,
+            Self::FillImageGradientConic => 8,
         }
     }
 

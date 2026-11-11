@@ -40,19 +40,12 @@ pub fn parse(line: &str) -> Option<Entry> {
     Some(Entry { when, kind, a, b, c })
 }
 
-fn all() -> Vec<Entry> {
-    data::read_text(&path(), 256 * 1024).map(|t| t.lines().filter_map(parse).collect()).unwrap_or_default()
-}
-
-pub fn list() -> Vec<Entry> {
-    let mut v = all();
+pub fn load() -> (Vec<Entry>, u64) {
+    let mut v: Vec<Entry> = data::read_text(&path(), 256 * 1024).map(|t| t.lines().filter_map(parse).collect()).unwrap_or_default();
+    let freed = v.iter().filter(|e| e.kind == "clean").fold(0u64, |total, e| total.saturating_add(e.a));
     v.reverse();
     v.truncate(SHOWN);
-    v
-}
-
-pub fn total_freed() -> u64 {
-    all().iter().filter(|e| e.kind == "clean").fold(0, |total, e| total.saturating_add(e.a))
+    (v, freed)
 }
 
 pub fn clear() {

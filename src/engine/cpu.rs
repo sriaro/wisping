@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::sync::OnceLock;
 
 use windows::Win32::System::SystemInformation::{GetLogicalProcessorInformationEx, LOGICAL_PROCESSOR_RELATIONSHIP, RelationProcessorCore, SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX};
@@ -41,11 +42,20 @@ pub fn compute_threads() -> usize {
     topology().fast_cores.clamp(2, 16)
 }
 
+const NORMAL: u8 = 0;
+const URGENT: u8 = 1;
+const ECO: u8 = 2;
+
+thread_local! {
+    static MODE: Cell<u8> = const { Cell::new(NORMAL) };
+}
+
 pub fn urgent() {
     unsafe {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
     throttle(Some(false));
+    MODE.set(URGENT);
 }
 
 pub fn eco() {
@@ -53,6 +63,7 @@ pub fn eco() {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
     }
     throttle(Some(true));
+    MODE.set(ECO);
 }
 
 pub fn normal() {
@@ -61,6 +72,23 @@ pub fn normal() {
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
     }
     throttle(None);
+    MODE.set(NORMAL);
+}
+
+pub fn mode() -> u8 {
+    MODE.get()
+}
+
+pub fn resume(mode: u8) {
+    if MODE.get() == mode {
+        return;
+    }
+    normal();
+    match mode {
+        URGENT => urgent(),
+        ECO => eco(),
+        _ => {}
+    }
 }
 
 fn throttle(on: Option<bool>) {

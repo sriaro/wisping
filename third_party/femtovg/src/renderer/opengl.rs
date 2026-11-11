@@ -34,8 +34,8 @@ pub struct OpenGl {
     is_opengles_2_0: bool,
     view: [f32; 2],
     screen_view: [f32; 2],
-    main_programs_with_glyph_texture: [Option<MainProgram>; 11],
-    main_programs_without_glyph_texture: [Option<MainProgram>; 11],
+    main_programs_with_glyph_texture: [Option<MainProgram>; 9],
+    main_programs_without_glyph_texture: [Option<MainProgram>; 9],
     current_program: u8,
     current_program_needs_glyph_texture: bool,
     vert_arr: Option<<glow::Context as glow::HasContext>::VertexArray>,
@@ -108,7 +108,6 @@ impl OpenGl {
                         false,
                     )?)
                 },
-                None,
                 Some(MainProgram::new(
                     &context,
                     antialias,
@@ -121,16 +120,6 @@ impl OpenGl {
                     ShaderType::FillImageGradientConic,
                     with_glyph_texture,
                 )?),
-                if with_glyph_texture {
-                    None
-                } else {
-                    Some(MainProgram::new(
-                        &context,
-                        antialias,
-                        ShaderType::FilterImageColorMatrix,
-                        false,
-                    )?)
-                },
             ])
         };
 
@@ -602,10 +591,6 @@ impl Renderer for OpenGl {
         unsafe {
             self.context.viewport(0, 0, width as i32, height as i32);
         }
-    }
-
-    fn get_native_texture(&self, image: &Self::Image) -> Result<Self::NativeTexture, ErrorKind> {
-        Ok(image.id())
     }
 
     fn render(
