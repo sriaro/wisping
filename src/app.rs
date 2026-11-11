@@ -94,7 +94,11 @@ type Action = Box<dyn FnOnce()>;
 thread_local! {
     static PENDING: RefCell<Option<Action>> = RefCell::new(None);
     static TOAST: Timer = Timer::default();
+    static TOAST_NEXT: Timer = Timer::default();
+    static TOAST_CLOSED: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
 }
+
+const TOAST_LEAVE: Duration = Duration::from_millis(240);
 
 #[derive(Clone)]
 pub struct Ctx {
@@ -108,17 +112,44 @@ impl Ctx {
     }
 }
 
-pub fn toast(c: &Ctx, text: String) {
-    let Some(ui) = c.weak.upgrade() else { return };
+fn hide_toast(ui: &MainWindow) {
+    ui.global::<AppState>().set_toast_open(false);
+    TOAST_CLOSED.set(Some(std::time::Instant::now()));
+}
+
+fn show_toast(ui: &MainWindow, text: String) {
     let st = ui.global::<AppState>();
     let shown = (3400 + 45 * text.chars().count().saturating_sub(40) as u64).min(7000);
     st.set_toast_text(text.into());
     st.set_toast_open(true);
-    let weak = c.weak.clone();
+    let weak = ui.as_weak();
     TOAST.with(|t| {
         t.start(TimerMode::SingleShot, Duration::from_millis(shown), move || {
             if let Some(ui) = weak.upgrade() {
-                ui.global::<AppState>().set_toast_open(false);
+                hide_toast(&ui);
+            }
+        });
+    });
+}
+
+pub fn toast(c: &Ctx, text: String) {
+    let Some(ui) = c.weak.upgrade() else { return };
+    if ui.global::<AppState>().get_toast_open() {
+        TOAST.with(|t| t.stop());
+        hide_toast(&ui);
+    }
+    let wait = TOAST_CLOSED.get().map_or(Duration::ZERO, |at| TOAST_LEAVE.saturating_sub(at.elapsed()));
+    if wait.is_zero() {
+        TOAST_NEXT.with(|t| t.stop());
+        show_toast(&ui, text);
+        return;
+    }
+    let weak = c.weak.clone();
+    let mut text = Some(text);
+    TOAST_NEXT.with(|t| {
+        t.start(TimerMode::SingleShot, wait, move || {
+            if let (Some(ui), Some(text)) = (weak.upgrade(), text.take()) {
+                show_toast(&ui, text);
             }
         });
     });
