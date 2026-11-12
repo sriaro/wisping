@@ -86,6 +86,7 @@ fn switch(c: &Ctx, id: &'static str, on: bool) {
         let _ = weak.upgrade_in_event_loop(move |ui| {
             let c = Ctx::new(ui.as_weak(), core);
             set_busy(&c, None);
+            crate::pages::backups::changed(&ui);
             match result {
                 Ok(()) => toast(&c, i18n::get(&format!("tools.{}.{}", id, if on { "on" } else { "off" }))),
                 Err(e) => show_error(&c, error_text(&e)),
@@ -124,6 +125,7 @@ fn start(c: &Ctx, id: &'static str) {
             let c = Ctx::new(ui.as_weak(), core);
             finish(&c, id, result);
             push(&ui);
+            crate::pages::backups::changed(&ui);
         });
     });
 }

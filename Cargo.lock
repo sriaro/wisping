@@ -1168,7 +1168,6 @@ dependencies = [
  "fnv",
  "glow",
  "imgref",
- "itertools 0.15.0",
  "rgb",
  "slotmap",
  "swash",
@@ -1907,16 +1906,11 @@ dependencies = [
 name = "i-slint-renderer-femtovg"
 version = "1.18.1"
 dependencies = [
- "cfg-if",
- "const-field-offset",
  "femtovg",
- "glow",
  "i-slint-common",
  "i-slint-core",
- "i-slint-core-macros",
  "imgref",
  "lyon_path",
- "pin-weak",
  "rgb",
 ]
 

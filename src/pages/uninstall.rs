@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use slint::ComponentHandle;
 
@@ -162,16 +163,35 @@ pub fn install(c: &Ctx) {
                 i18n::fmt("uninst.confirm.text", &[&crate::views::ltr(&p.command)]),
                 i18n::get("uninst.btn"),
                 true,
-                Box::new(move || match programs::launch_uninstaller(&p) {
-                    Ok(()) => {
-                        data::log(&format!("uninstaller started {}", p.name));
-                        toast(&c2, i18n::get("uninst.started"));
-                    }
-                    Err(e) if e.to_string() == programs::ELEVATED_USER_ENTRY => show_error(&c2, i18n::fmt("uninst.elevated", &[&crate::views::ltr(&p.name)])),
-                    Err(e) => show_error(&c2, error_text(&e)),
-                }),
+                Box::new(move || start_uninstaller(&c2, p)),
             );
         }
+    });
+}
+
+static LAUNCHING: AtomicBool = AtomicBool::new(false);
+
+fn start_uninstaller(c: &Ctx, p: Program) {
+    if LAUNCHING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let weak = c.weak.clone();
+    let core = c.core.clone();
+    crate::engine::pool::spawn(move || {
+        let _reset = crate::app::panic_reset(&weak, |_| LAUNCHING.store(false, Ordering::SeqCst));
+        let result = programs::launch_uninstaller(&p);
+        if result.is_ok() {
+            data::log(&format!("uninstaller started {}", p.name));
+        }
+        LAUNCHING.store(false, Ordering::SeqCst);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let c = Ctx::new(ui.as_weak(), core);
+            match result {
+                Ok(()) => toast(&c, i18n::get("uninst.started")),
+                Err(e) if e.to_string() == programs::ELEVATED_USER_ENTRY => show_error(&c, i18n::fmt("uninst.elevated", &[&crate::views::ltr(&p.name)])),
+                Err(e) => show_error(&c, error_text(&e)),
+            }
+        });
     });
 }
 

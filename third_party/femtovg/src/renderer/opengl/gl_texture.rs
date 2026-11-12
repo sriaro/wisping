@@ -8,23 +8,9 @@ use crate::{ErrorKind, ImageFlags, ImageInfo, ImageSource, PixelFormat};
 pub struct GlTexture {
     id: <glow::Context as glow::HasContext>::Texture,
     info: ImageInfo,
-    owned: bool,
-    pub(super) external: bool,
 }
 
 impl GlTexture {
-    pub fn new_from_native_texture(
-        texture: <glow::Context as glow::HasContext>::Texture,
-        info: ImageInfo,
-        external: bool,
-    ) -> Self {
-        Self {
-            id: texture,
-            info,
-            owned: false,
-            external,
-        }
-    }
     pub fn new(context: &Rc<glow::Context>, info: ImageInfo, opengles_2_0: bool) -> Result<Self, ErrorKind> {
         let id = unsafe {
             let id = context.create_texture().unwrap();
@@ -38,12 +24,7 @@ impl GlTexture {
             id
         };
 
-        let texture = Self {
-            id,
-            info,
-            owned: true,
-            external: false,
-        };
+        let texture = Self { id, info };
 
         let bytes_per_pixel = match info.format() {
             PixelFormat::Gray8 => 1,
@@ -270,10 +251,8 @@ impl GlTexture {
     }
 
     pub fn delete(self, context: &Rc<glow::Context>) {
-        if self.owned {
-            unsafe {
-                context.delete_texture(self.id);
-            }
+        unsafe {
+            context.delete_texture(self.id);
         }
     }
 

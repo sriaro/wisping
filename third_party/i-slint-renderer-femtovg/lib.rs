@@ -21,7 +21,6 @@ use i_slint_core::platform::PlatformError;
 use i_slint_core::renderer::{DrawOutcome, RendererSealed};
 use i_slint_core::textlayout::sharedparley;
 use i_slint_core::window::{WindowAdapter, WindowInner};
-use images::TextureImporter;
 
 type PhysicalLength = euclid::Length<f32, PhysicalPx>;
 type PhysicalRect = euclid::Rect<f32, PhysicalPx>;
@@ -59,7 +58,7 @@ pub enum BeginRendering<S> {
 }
 
 pub trait GraphicsBackend {
-    type Renderer: femtovg::Renderer + TextureImporter;
+    type Renderer: femtovg::Renderer;
     type WindowSurface: WindowSurface<Self::Renderer>;
     const NAME: &'static str;
     fn new_suspended() -> Self;

@@ -433,14 +433,6 @@ where
         self.images.alloc(&mut self.renderer, info)
     }
 
-    pub fn create_image_from_native_texture(
-        &mut self,
-        texture: T::NativeTexture,
-        info: ImageInfo,
-    ) -> Result<ImageId, ErrorKind> {
-        self.images.register_native_texture(&mut self.renderer, texture, info)
-    }
-
     pub fn create_image<'a, S: Into<ImageSource<'a>>>(
         &mut self,
         src: S,
@@ -452,10 +444,6 @@ where
         let id = self.create_image_empty(size.width, size.height, src.format(), flags)?;
         self.images.update(&mut self.renderer, id, src, 0, 0)?;
         Ok(id)
-    }
-
-    pub fn get_image(&self, id: ImageId) -> Option<&T::Image> {
-        self.images.get(id)
     }
 
     pub fn update_image<'a, S: Into<ImageSource<'a>>>(

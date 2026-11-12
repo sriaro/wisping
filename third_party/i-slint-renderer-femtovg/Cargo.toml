@@ -27,19 +27,10 @@ bench = false
 name = "i_slint_renderer_femtovg"
 path = "lib.rs"
 
-[dependencies.cfg-if]
-version = "1"
-
-[dependencies.const-field-offset]
-version = "0.2.1"
-
 [dependencies.femtovg]
 version = "0.27"
 features = ["swash"]
 default-features = false
-
-[dependencies.glow]
-version = "0.18"
 
 [dependencies.i-slint-common]
 version = "=1.18.1"
@@ -59,20 +50,12 @@ features = [
 ]
 default-features = false
 
-[dependencies.i-slint-core-macros]
-version = "=1.18.1"
-features = ["default"]
-default-features = false
-
 [dependencies.imgref]
 version = "1.6.1"
 
 [dependencies.lyon_path]
 version = "1.0"
 default-features = false
-
-[dependencies.pin-weak]
-version = "1"
 
 [dependencies.rgb]
 version = "0.8.27"

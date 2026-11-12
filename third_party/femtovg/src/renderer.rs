@@ -82,8 +82,6 @@ pub enum RenderTarget {
 pub trait Renderer {
     type Image;
 
-    type NativeTexture;
-
     type RenderOutput;
 
     type CommandBuffer;
@@ -99,12 +97,6 @@ pub trait Renderer {
     ) -> Self::CommandBuffer;
 
     fn alloc_image(&mut self, info: ImageInfo) -> Result<Self::Image, ErrorKind>;
-
-    fn create_image_from_native_texture(
-        &mut self,
-        native_texture: Self::NativeTexture,
-        info: ImageInfo,
-    ) -> Result<Self::Image, ErrorKind>;
 
     fn update_image(&mut self, image: &mut Self::Image, data: ImageSource, x: usize, y: usize)
         -> Result<(), ErrorKind>;

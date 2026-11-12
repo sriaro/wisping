@@ -27,7 +27,6 @@ use i_slint_core::lengths::{
 use i_slint_core::textlayout::sharedparley::{self, GlyphRenderer, fontique, parley};
 use i_slint_core::{Brush, Color, ImageInner, SharedString};
 
-use crate::images::TextureImporter;
 
 use super::PhysicalSize;
 use super::images::{Texture, TextureCacheKey};
@@ -44,7 +43,7 @@ fn pixmap_bytes(width: u32, height: u32, data: &[u8]) -> Option<&[u8]> {
     data.get(..required)
 }
 
-pub enum ItemGraphicsCacheEntry<R: femtovg::Renderer + TextureImporter> {
+pub enum ItemGraphicsCacheEntry<R: femtovg::Renderer> {
     Texture(Rc<Texture<R>>),
     ColorizedImage {
         _original_image: Rc<Texture<R>>,
@@ -52,7 +51,7 @@ pub enum ItemGraphicsCacheEntry<R: femtovg::Renderer + TextureImporter> {
     },
 }
 
-impl<R: femtovg::Renderer + TextureImporter> Clone for ItemGraphicsCacheEntry<R> {
+impl<R: femtovg::Renderer> Clone for ItemGraphicsCacheEntry<R> {
     fn clone(&self) -> Self {
         match self {
             Self::Texture(arg0) => Self::Texture(arg0.clone()),
@@ -64,7 +63,7 @@ impl<R: femtovg::Renderer + TextureImporter> Clone for ItemGraphicsCacheEntry<R>
     }
 }
 
-impl<R: femtovg::Renderer + TextureImporter> ItemGraphicsCacheEntry<R> {
+impl<R: femtovg::Renderer> ItemGraphicsCacheEntry<R> {
     fn as_texture(&self) -> &Rc<Texture<R>> {
         match self {
             ItemGraphicsCacheEntry::Texture(image) => image,
@@ -86,7 +85,7 @@ struct State {
     current_render_target: femtovg::RenderTarget,
 }
 
-pub struct GLItemRenderer<'a, R: femtovg::Renderer + TextureImporter> {
+pub struct GLItemRenderer<'a, R: femtovg::Renderer> {
     graphics_cache: &'a ItemGraphicsCache<R>,
     layer_cache: &'a LayerCache<R>,
     texture_cache: &'a RefCell<super::images::TextureCache<R>>,
@@ -165,13 +164,13 @@ fn rect_to_path(r: PhysicalRect) -> femtovg::Path {
     rect_with_radius_to_path(r, PhysicalBorderRadius::default())
 }
 
-impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
+impl<'a, R: femtovg::Renderer> GLItemRenderer<'a, R> {
     pub fn metrics(&self) -> RenderingMetrics {
         self.metrics.clone()
     }
 }
 
-impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer<'a, R> {
+impl<'a, R: femtovg::Renderer> ItemRenderer for GLItemRenderer<'a, R> {
     fn global_alpha_transparent(&self) -> bool {
         self.state.last().unwrap().global_alpha == 0.0
     }
@@ -829,7 +828,7 @@ pub enum GlyphBrush {
     Stroke(femtovg::Paint),
 }
 
-impl<'a, R: femtovg::Renderer + TextureImporter> GlyphRenderer for GLItemRenderer<'a, R> {
+impl<'a, R: femtovg::Renderer> GlyphRenderer for GLItemRenderer<'a, R> {
     type PlatformBrush = GlyphBrush;
 
     fn platform_text_fill_brush(
@@ -949,7 +948,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GlyphRenderer for GLItemRendere
     }
 }
 
-impl<'a, R: femtovg::Renderer + TextureImporter> LayerRenderer<'a> for GLItemRenderer<'a, R> {
+impl<'a, R: femtovg::Renderer> LayerRenderer<'a> for GLItemRenderer<'a, R> {
     type LayerTarget = Rc<Texture<R>>;
     type Image = Rc<Texture<R>>;
 
@@ -1016,7 +1015,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> LayerRenderer<'a> for GLItemRen
     }
 }
 
-impl<'a, R: femtovg::Renderer + TextureImporter> GLItemRenderer<'a, R> {
+impl<'a, R: femtovg::Renderer> GLItemRenderer<'a, R> {
     pub(super) fn new(
         canvas: &CanvasRc<R>,
         graphics_cache: &'a ItemGraphicsCache<R>,

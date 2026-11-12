@@ -725,7 +725,7 @@ impl PinnedDir {
         Ok(file)
     }
 
-    pub fn update_file(&self, name: &OsStr, update: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
+    fn update_file(&self, name: &OsStr, durable: bool, update: impl FnOnce(&mut File) -> io::Result<()>) -> io::Result<()> {
         static WRITERS: Mutex<()> = Mutex::new(());
         let _writer = WRITERS.locked();
         child_name(name)?;
@@ -739,11 +739,11 @@ impl PinnedDir {
             return Err(refused_path());
         }
         update(&mut file)?;
-        file.sync_all()
+        if durable { file.sync_all() } else { Ok(()) }
     }
 
     pub fn write_file(&self, name: &OsStr, contents: &[u8]) -> io::Result<()> {
-        self.update_file(name, |file| {
+        self.update_file(name, true, |file| {
             file.set_len(0)?;
             file.seek(SeekFrom::Start(0))?;
             file.write_all(contents)
@@ -751,7 +751,7 @@ impl PinnedDir {
     }
 
     pub fn append_file(&self, name: &OsStr, contents: &[u8]) -> io::Result<()> {
-        self.update_file(name, |file| {
+        self.update_file(name, false, |file| {
             file.seek(SeekFrom::End(0))?;
             file.write_all(contents)
         })
@@ -759,7 +759,7 @@ impl PinnedDir {
 
     pub fn append_lines(&self, name: &OsStr, line: &str, keep: usize) -> io::Result<()> {
         const TAIL: u64 = 1 << 20;
-        self.update_file(name, |file| {
+        self.update_file(name, true, |file| {
             let len = file.metadata()?.len();
             let mut bytes = Vec::new();
             if len > TAIL {

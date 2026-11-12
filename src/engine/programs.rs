@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::io;
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR, w};
@@ -144,9 +145,13 @@ pub fn launch_uninstaller(p: &Program) -> io::Result<()> {
     let file = dir_pin.read_file(name).map_err(|_| io::Error::other("nouninstaller"))?;
     let dir = exe_path.parent().map(|d| HSTRING::from(d.as_os_str()));
     let params = HSTRING::from(args.as_str());
+    let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
     let result = unsafe {
         ShellExecuteW(None, w!("open"), &HSTRING::from(exe.as_str()), if args.is_empty() { PCWSTR::null() } else { PCWSTR(params.as_ptr()) }, dir.as_ref().map_or(PCWSTR::null(), |d| PCWSTR(d.as_ptr())), SW_SHOWNORMAL)
     };
+    if com.is_ok() {
+        unsafe { CoUninitialize() };
+    }
     drop(file);
     drop(dir_pin);
     if result.0 as isize > 32 { Ok(()) } else { Err(io::Error::other("nostart")) }

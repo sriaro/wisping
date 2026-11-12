@@ -385,3 +385,14 @@ pub fn install(c: &Ctx) {
 pub fn refresh(ui: &MainWindow) {
     push(ui);
 }
+
+pub fn changed(ui: &MainWindow) {
+    if ui.global::<crate::AppState>().get_page() != 7 {
+        forget();
+        return;
+    }
+    revalidate(ui);
+    if ui.global::<BackupsState>().get_tab() == 0 {
+        push(ui);
+    }
+}

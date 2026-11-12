@@ -340,6 +340,7 @@ fn run_clean(c: &Ctx) {
             st.set_has_report(g.last_report.is_some());
             push_all(&ui, &g);
             drop(g);
+            crate::pages::backups::changed(&ui);
             push_low_disk(&ui);
             let (size, rest) = (data::format_size(freed), data::format_size(left));
             let text = if failed > 0 { i18n::fmt("toast.freed.failed", &[&size, &failed.to_string(), &rest]) } else { i18n::fmt("toast.freed", &[&size, &rest]) };
@@ -406,6 +407,7 @@ fn run_fix(c: &Ctx) {
             crate::winui::trim_soon();
             ui.global::<AppState>().set_busy(false);
             push_all(&ui, &core.locked());
+            crate::pages::backups::changed(&ui);
             if errors.is_empty() {
                 toast(&ctx(), i18n::fmt("toast.fixed", &[&fixed.to_string(), &total.to_string()]));
             } else {
@@ -562,6 +564,7 @@ fn delete_start(c: &Ctx, i: usize) {
                     push_startups(&ui, &g);
                     push_home(&ui, &g);
                     drop(g);
+                    crate::pages::backups::changed(&ui);
                     match outcome {
                         Ok(()) => toast(&ctx(), i18n::get("toast.removed")),
                         Err(e) => show_error(&ctx(), error_text(&e)),

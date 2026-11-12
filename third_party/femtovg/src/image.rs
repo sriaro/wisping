@@ -173,16 +173,6 @@ impl<T> ImageStore<T> {
         Ok(ImageId(self.0.insert((info, image))))
     }
 
-    pub fn register_native_texture<R: Renderer<Image = T>>(
-        &mut self,
-        renderer: &mut R,
-        texture: R::NativeTexture,
-        info: ImageInfo,
-    ) -> Result<ImageId, ErrorKind> {
-        let image = renderer.create_image_from_native_texture(texture, info)?;
-        Ok(ImageId(self.0.insert((info, image))))
-    }
-
     pub fn get(&self, id: ImageId) -> Option<&T> {
         self.0.get(id.0).map(|inner| &inner.1)
     }

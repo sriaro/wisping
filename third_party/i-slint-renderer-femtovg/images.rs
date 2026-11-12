@@ -4,7 +4,6 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use i_slint_core::graphics::BorrowedOpenGLTexture;
 use i_slint_core::graphics::euclid;
 use i_slint_core::graphics::{ImageCacheKey, IntSize, SharedImageBuffer, SharedPixelBuffer};
 use i_slint_core::items::ImageTiling;
@@ -13,25 +12,12 @@ use i_slint_core::{ImageInner, items::ImageRendering};
 
 use super::itemrenderer::CanvasRc;
 
-pub trait TextureImporter
-where
-    Self: femtovg::Renderer + Sized,
-{
-    fn convert_opengl_texture(opengl_texture: std::num::NonZero<u32>) -> Self::NativeTexture;
-}
-
-impl TextureImporter for femtovg::renderer::OpenGl {
-    fn convert_opengl_texture(opengl_texture: std::num::NonZero<u32>) -> Self::NativeTexture {
-        glow::NativeTexture(opengl_texture)
-    }
-}
-
-pub struct Texture<R: femtovg::Renderer + TextureImporter> {
+pub struct Texture<R: femtovg::Renderer> {
     pub id: femtovg::ImageId,
     canvas: CanvasRc<R>,
 }
 
-impl<R: femtovg::Renderer + TextureImporter> Texture<R> {
+impl<R: femtovg::Renderer> Texture<R> {
     pub fn size(&self) -> Option<IntSize> {
         self.canvas
             .borrow()
@@ -111,54 +97,22 @@ impl<R: femtovg::Renderer + TextureImporter> Texture<R> {
     ) -> Option<Rc<Self>> {
         let image_flags = base_image_flags(scaling, tiling);
 
-        let image_id = match image {
-            ImageInner::BorrowedOpenGLTexture(BorrowedOpenGLTexture {
-                texture_id,
-                size,
-                origin,
-                ..
-            }) => {
-                let image_flags = match origin {
-                    i_slint_core::graphics::BorrowedOpenGLTextureOrigin::TopLeft => image_flags,
-                    i_slint_core::graphics::BorrowedOpenGLTextureOrigin::BottomLeft => {
-                        image_flags | femtovg::ImageFlags::FLIP_Y
-                    }
-                    _ => unimplemented!(
-                        "internal error: missing implementation for BorrowedOpenGLTextureOrigin"
-                    ),
-                };
-                canvas
-                    .borrow_mut()
-                    .create_image_from_native_texture(
-                        <R as TextureImporter>::convert_opengl_texture(*texture_id),
-                        femtovg::ImageInfo::new(
-                            image_flags,
-                            size.width as _,
-                            size.height as _,
-                            femtovg::PixelFormat::Rgba8,
-                        ),
-                    )
-                    .unwrap()
-            }
-            _ => {
-                let buffer = image.render_to_buffer(target_size_for_scalable_source)?;
-                let (image_source, flags) = image_buffer_to_image_source(&buffer);
-                let mipmaps = if target_size_for_scalable_source.is_none()
-                    && !image_flags.contains(femtovg::ImageFlags::NEAREST)
-                {
-                    femtovg::ImageFlags::GENERATE_MIPMAPS
-                } else {
-                    femtovg::ImageFlags::empty()
-                };
-                canvas.borrow_mut().create_image(image_source, image_flags | flags | mipmaps).unwrap()
-            }
+        let buffer = image.render_to_buffer(target_size_for_scalable_source)?;
+        let (image_source, flags) = image_buffer_to_image_source(&buffer);
+        let mipmaps = if target_size_for_scalable_source.is_none()
+            && !image_flags.contains(femtovg::ImageFlags::NEAREST)
+        {
+            femtovg::ImageFlags::GENERATE_MIPMAPS
+        } else {
+            femtovg::ImageFlags::empty()
         };
+        let image_id = canvas.borrow_mut().create_image(image_source, image_flags | flags | mipmaps).unwrap();
 
         Some(Self::adopt(canvas, image_id))
     }
 }
 
-impl<R: femtovg::Renderer + TextureImporter> Drop for Texture<R> {
+impl<R: femtovg::Renderer> Drop for Texture<R> {
     fn drop(&mut self) {
         self.canvas.borrow_mut().delete_image(self.id);
     }
@@ -188,17 +142,17 @@ impl TextureCacheKey {
     }
 }
 
-pub struct TextureCache<R: femtovg::Renderer + TextureImporter>(
+pub struct TextureCache<R: femtovg::Renderer>(
     HashMap<TextureCacheKey, Rc<Texture<R>>>,
 );
 
-impl<R: femtovg::Renderer + TextureImporter> Default for TextureCache<R> {
+impl<R: femtovg::Renderer> Default for TextureCache<R> {
     fn default() -> Self {
         Self(Default::default())
     }
 }
 
-impl<R: femtovg::Renderer + TextureImporter> TextureCache<R> {
+impl<R: femtovg::Renderer> TextureCache<R> {
     pub(crate) fn lookup_image_in_cache_or_create(
         &mut self,
         cache_key: TextureCacheKey,
