@@ -47,12 +47,6 @@ impl Sub for Position {
     }
 }
 
-impl Position {
-    pub(crate) fn equals(p1: Self, p2: Self, tol: f32) -> bool {
-        (p2 - p1).mag2() < tol * tol
-    }
-}
-
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Vector {
     pub x: f32,
@@ -202,27 +196,6 @@ impl Transform2D {
 
         *x += tx;
         *y += ty;
-    }
-
-    pub fn rotate(&mut self, a: f32) {
-        let (sin, cos) = a.sin_cos();
-
-        let Self([a, b, c, d, x, y]) = self;
-
-        [*a, *b] = [*a * cos - *b * sin, *a * sin + *b * cos];
-        [*c, *d] = [*c * cos - *d * sin, *c * sin + *d * cos];
-        [*x, *y] = [*x * cos - *y * sin, *x * sin + *y * cos];
-    }
-
-    pub fn scale(&mut self, sx: f32, sy: f32) {
-        let Self([a, b, c, d, x, y]) = self;
-
-        *a *= sx;
-        *b *= sy;
-        *c *= sx;
-        *d *= sy;
-        *x *= sx;
-        *y *= sy;
     }
 
     #[inline]
@@ -450,11 +423,5 @@ impl Default for Bounds {
             maxx: -1e6,
             maxy: -1e6,
         }
-    }
-}
-
-impl Bounds {
-    pub(crate) fn contains(&self, x: f32, y: f32) -> bool {
-        (self.minx..=self.maxx).contains(&x) && (self.miny..=self.maxy).contains(&y)
     }
 }

@@ -216,27 +216,21 @@ impl GlyphTexture {
 
 #[derive(Clone, Debug)]
 pub struct StrokeSettings {
-    pub(crate) stencil_strokes: bool,
     pub(crate) miter_limit: f32,
     pub(crate) line_width: f32,
     pub(crate) line_cap_start: LineCap,
     pub(crate) line_cap_end: LineCap,
     pub(crate) line_join: LineJoin,
-    pub(crate) line_dash: Vec<f32>,
-    pub(crate) line_dash_offset: f32,
 }
 
 impl Default for StrokeSettings {
     fn default() -> Self {
         Self {
-            stencil_strokes: true,
             miter_limit: 10.0,
             line_width: 1.0,
             line_cap_start: LineCap::default(),
             line_cap_end: LineCap::default(),
             line_join: LineJoin::default(),
-            line_dash: Vec::new(),
-            line_dash_offset: 0.0,
         }
     }
 }
@@ -362,11 +356,6 @@ impl Paint {
     }
 
     #[inline]
-    pub fn anti_alias(&self) -> bool {
-        self.shape_anti_alias
-    }
-
-    #[inline]
     pub fn set_anti_alias(&mut self, value: bool) {
         self.shape_anti_alias = value;
     }
@@ -378,38 +367,13 @@ impl Paint {
     }
 
     #[inline]
-    pub fn stencil_strokes(&self) -> bool {
-        self.stroke.stencil_strokes
-    }
-
-    #[inline]
-    pub fn line_width(&self) -> f32 {
-        self.stroke.line_width
-    }
-
-    #[inline]
     pub fn set_line_width(&mut self, width: f32) {
         self.stroke.line_width = width;
     }
 
     #[inline]
-    pub fn miter_limit(&self) -> f32 {
-        self.stroke.miter_limit
-    }
-
-    #[inline]
     pub fn set_miter_limit(&mut self, limit: f32) {
         self.stroke.miter_limit = limit;
-    }
-
-    #[inline]
-    pub fn line_cap_start(&self) -> LineCap {
-        self.stroke.line_cap_start
-    }
-
-    #[inline]
-    pub fn line_cap_end(&self) -> LineCap {
-        self.stroke.line_cap_end
     }
 
     pub fn set_line_cap(&mut self, cap: LineCap) {
@@ -418,38 +382,13 @@ impl Paint {
     }
 
     #[inline]
-    pub fn line_join(&self) -> LineJoin {
-        self.stroke.line_join
-    }
-
-    #[inline]
     pub fn set_line_join(&mut self, join: LineJoin) {
         self.stroke.line_join = join;
     }
 
     #[inline]
-    pub fn line_dash(&self) -> &[f32] {
-        &self.stroke.line_dash
-    }
-
-    #[inline]
-    pub fn line_dash_offset(&self) -> f32 {
-        self.stroke.line_dash_offset
-    }
-
-    #[inline]
-    pub fn font_size(&self) -> f32 {
-        self.text.font_size
-    }
-
-    #[inline]
     pub fn set_font_size(&mut self, size: f32) {
         self.text.font_size = size;
-    }
-
-    #[inline]
-    pub fn fill_rule(&self) -> FillRule {
-        self.fill_rule
     }
 
     #[inline]

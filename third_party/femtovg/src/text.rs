@@ -37,7 +37,6 @@ pub struct RenderedGlyphId {
     size: u32,
     line_width: u32,
     render_mode: RenderMode,
-    subpixel_location: u8,
     variation_hash: u64,
 }
 
@@ -48,7 +47,6 @@ impl RenderedGlyphId {
         font_size: f32,
         line_width: f32,
         mode: RenderMode,
-        subpixel_location: u8,
         normalized_coords: &[i16],
     ) -> Self {
         use std::hash::Hasher;
@@ -60,7 +58,6 @@ impl RenderedGlyphId {
             size: (font_size * 10.0).trunc() as u32,
             line_width: (line_width * 10.0).trunc() as u32,
             render_mode: mode,
-            subpixel_location,
             variation_hash: hasher.finish(),
         }
     }
@@ -127,17 +124,12 @@ impl TextContextImpl {
         data: T,
         face_index: u32,
     ) -> Result<FontId, ErrorKind> {
-        self.clear_caches();
-
         let font = Font::new_with_data(data, face_index, self)?;
         Ok(FontId(self.fonts.insert(font)))
     }
 
     pub fn font_mut(&mut self, id: FontId) -> Option<&mut Font> {
         self.fonts.get_mut(id.0)
-    }
-
-    fn clear_caches(&mut self) {
     }
 }
 
@@ -197,7 +189,6 @@ impl GlyphAtlas {
         canvas: &mut Canvas<T>,
         font_id: FontId,
         font: &Font,
-        font_face: &font::FontFaceRef<'_>,
         glyphs: impl Iterator<Item = PositionedGlyph>,
         font_size: f32,
         line_width: f32,
@@ -216,15 +207,12 @@ impl GlyphAtlas {
         let initial_render_target = canvas.current_render_target;
 
         for glyph in glyphs {
-            let subpixel_location = 0.0_f32;
-
             let id = RenderedGlyphId::new(
                 glyph.glyph_id,
                 font_id,
                 font_size,
                 line_width,
                 mode,
-                subpixel_location as u8,
                 normalized_coords,
             );
 
@@ -239,9 +227,7 @@ impl GlyphAtlas {
                         line_width,
                         mode,
                         font,
-                        font_face,
                         glyph.glyph_id,
-                        subpixel_location / 10.0,
                         normalized_coords,
                     )?;
                     glyph_cache_entry.insert_entry(result)
@@ -303,15 +289,11 @@ impl GlyphAtlas {
         line_width: f32,
         mode: RenderMode,
         font: &Font,
-        font_face: &font::FontFaceRef<'_>,
         glyph_id: u16,
-        _subpixel_x: f32,
         normalized_coords: &[i16],
     ) -> Result<Option<RenderedGlyph>, ErrorKind> {
         if mode == RenderMode::Fill {
-            if let Some(result) =
-                self.render_glyph_swash(canvas, font, font_size, glyph_id, _subpixel_x, normalized_coords)?
-            {
+            if let Some(result) = self.render_glyph_swash(canvas, font, font_size, glyph_id, normalized_coords)? {
                 return Ok(Some(result));
             }
         }
@@ -320,12 +302,10 @@ impl GlyphAtlas {
 
         let (mut glyph_representation, glyph_metrics, scale) = {
             let scale = font.scale(font_size);
-            let maybe_glyph_metrics = font
-                .glyph(font_face, glyph_id, normalized_coords)
-                .map(|g| g.metrics.clone());
+            let maybe_glyph_metrics = font.glyph(glyph_id, normalized_coords).map(|g| g.metrics.clone());
 
             if let (Some(glyph_representation), Some(glyph_metrics)) = (
-                font.glyph_rendering_representation(font_face, glyph_id, font_size as u16, normalized_coords),
+                font.glyph_rendering_representation(glyph_id, normalized_coords),
                 maybe_glyph_metrics,
             ) {
                 (glyph_representation, glyph_metrics, scale)
@@ -334,13 +314,7 @@ impl GlyphAtlas {
             }
         };
 
-        let color_glyph = false;
-
-        let line_width = if color_glyph || mode != RenderMode::Stroke {
-            0.0
-        } else {
-            line_width
-        };
+        let line_width = if mode != RenderMode::Stroke { 0.0 } else { line_width };
 
         let line_width_offset = (line_width / 2.0).ceil();
 
@@ -366,7 +340,7 @@ impl GlyphAtlas {
             atlas_x: dst_x as u32 + GLYPH_MARGIN,
             atlas_y: dst_y as u32 + GLYPH_MARGIN,
             texture_index: dst_index,
-            color_glyph,
+            color_glyph: false,
         };
 
         match glyph_representation {
@@ -440,7 +414,6 @@ impl GlyphAtlas {
         font: &Font,
         font_size: f32,
         glyph_id: u16,
-        subpixel_x: f32,
         normalized_coords: &[i16],
     ) -> Result<Option<RenderedGlyph>, ErrorKind> {
         use swash::scale::{Render, Source, StrikeWith};
@@ -466,7 +439,6 @@ impl GlyphAtlas {
                 Source::Outline,
             ])
             .format(Format::Alpha)
-            .offset(swash::zeno::Vector::new(subpixel_x, 0.0))
             .render(&mut scaler, glyph_id)
         };
 
@@ -566,15 +538,6 @@ impl GlyphAtlas {
 
         texture_search_result.ok_or(ErrorKind::UnknownError)
     }
-
-    pub(crate) fn clear<T: Renderer>(&self, canvas: &mut Canvas<T>) {
-        let image_ids = std::mem::take(&mut *self.glyph_textures.borrow_mut())
-            .into_iter()
-            .map(|font_texture| font_texture.image_id);
-        image_ids.for_each(|id| canvas.delete_image(id));
-
-        self.rendered_glyphs.borrow_mut().clear();
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -589,15 +552,11 @@ pub fn render_direct<T: Renderer>(
     mode: RenderMode,
     normalized_coords: &[i16],
 ) -> Result<(), ErrorKind> {
-    let face = font.face_ref_with_normalized_coords(normalized_coords);
-
     for glyph in glyphs {
         let (glyph_rendering, scale) = {
             let scale = font.scale(font_size);
 
-            let Some(glyph_rendering) =
-                font.glyph_rendering_representation(&face, glyph.glyph_id, font_size as u16, normalized_coords)
-            else {
+            let Some(glyph_rendering) = font.glyph_rendering_representation(glyph.glyph_id, normalized_coords) else {
                 continue;
             };
 

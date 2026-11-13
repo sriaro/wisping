@@ -275,19 +275,6 @@ impl OpenGl {
         }
     }
 
-    fn stroke(&mut self, images: &ImageStore<GlTexture>, cmd: &Command, paint: &Params) {
-        self.set_uniforms(images, paint, cmd.image, cmd.glyph_texture);
-
-        for drawable in &cmd.drawables {
-            if let Some((start, count)) = drawable.stroke_verts {
-                unsafe {
-                    self.context
-                        .draw_arrays(glow::TRIANGLE_STRIP, start as i32, count as i32);
-                }
-            }
-        }
-    }
-
     fn stencil_stroke(&mut self, images: &ImageStore<GlTexture>, cmd: &Command, paint1: &Params, paint2: &Params) {
         unsafe {
             self.context.enable(glow::STENCIL_TEST);
@@ -640,7 +627,6 @@ impl Renderer for OpenGl {
                     ref stencil_params,
                     ref fill_params,
                 } => self.concave_fill(images, &cmd, stencil_params, fill_params),
-                CommandType::Stroke { ref params } => self.stroke(images, &cmd, params),
                 CommandType::StencilStroke {
                     ref params1,
                     ref params2,

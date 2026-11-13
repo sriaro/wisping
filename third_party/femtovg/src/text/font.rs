@@ -6,8 +6,6 @@ use std::rc::Rc;
 
 use crate::{ErrorKind, Path};
 
-pub(crate) struct FontFaceRef<'a>(std::marker::PhantomData<&'a ()>);
-
 #[derive(Clone, Debug)]
 pub struct GlyphMetrics {
     pub width: f32,
@@ -18,7 +16,7 @@ pub struct GlyphMetrics {
 
 #[derive(Debug)]
 pub struct Glyph {
-    pub path: Option<Path>,
+    pub path: Path,
     pub metrics: GlyphMetrics,
 }
 
@@ -67,20 +65,12 @@ impl Font {
         })
     }
 
-    pub(crate) fn face_ref(&self) -> FontFaceRef<'_> {
-        FontFaceRef(std::marker::PhantomData)
-    }
-
     pub(crate) fn swash_font_ref(&self) -> Option<swash::FontRef<'_>> {
         swash::FontRef::from_index(self.data.as_ref().as_ref(), self.face_index as usize)
     }
 
     fn swash_scale_context(&self) -> &RefCell<swash::scale::ScaleContext> {
         &self.swash_scale_context
-    }
-
-    pub(crate) fn face_ref_with_normalized_coords(&self, _coords: &[i16]) -> FontFaceRef<'_> {
-        self.face_ref()
     }
 
     pub fn scale(&self, size: f32) -> f32 {
@@ -96,7 +86,6 @@ impl Font {
 
     pub(crate) fn glyph(
         &self,
-        _face: &FontFaceRef<'_>,
         codepoint: u16,
         normalized_coords: &[i16],
     ) -> Option<Ref<'_, Glyph>> {
@@ -126,7 +115,7 @@ impl Font {
                     }
                 }
                 Some(Glyph {
-                    path: Some(path),
+                    path,
                     metrics: GlyphMetrics {
                         width: bounds.width(),
                         height: bounds.height(),
@@ -148,15 +137,10 @@ impl Font {
 
     pub(crate) fn glyph_rendering_representation(
         &self,
-        _face: &FontFaceRef<'_>,
         codepoint: u16,
-        #[allow(unused_variables)] _pixels_per_em: u16,
         normalized_coords: &[i16],
     ) -> Option<GlyphRendering<'_>> {
-        self.glyph(_face, codepoint, normalized_coords).and_then(|glyph| {
-            Ref::filter_map(glyph, |glyph| glyph.path.as_ref())
-                .ok()
-                .map(GlyphRendering::RenderAsPath)
-        })
+        self.glyph(codepoint, normalized_coords)
+            .map(|glyph| GlyphRendering::RenderAsPath(Ref::map(glyph, |glyph| &glyph.path)))
     }
 }

@@ -181,9 +181,6 @@ struct State {
     transform: Transform2D,
     scissor: Scissor,
     alpha: f32,
-    shadow_color: Color,
-    shadow_blur: f32,
-    shadow_offset: [f32; 2],
 }
 
 impl Default for State {
@@ -193,9 +190,6 @@ impl Default for State {
             transform: Transform2D::identity(),
             scissor: Scissor::default(),
             alpha: 1.0,
-            shadow_color: Color::rgbaf(0.0, 0.0, 0.0, 0.0),
-            shadow_blur: 0.0,
-            shadow_offset: [0.0, 0.0],
         }
     }
 }
@@ -207,52 +201,21 @@ pub struct Canvas<T: Renderer> {
     renderer: T,
     text_context: Rc<RefCell<TextContextImpl>>,
     glyph_atlas: Rc<GlyphAtlas>,
-    ephemeral_glyph_atlas: Option<Rc<GlyphAtlas>>,
     current_render_target: RenderTarget,
     state_stack: Vec<State>,
     commands: Vec<Command>,
     verts: Vec<Vertex>,
     images: ImageStore<T::Image>,
     fringe_width: f32,
-    device_px_ratio: f32,
     tess_tol: f32,
     dist_tol: f32,
     gradients: GradientStore,
-    shadow_images: Vec<ImageId>,
 }
 
 impl<T> Canvas<T>
 where
     T: Renderer,
 {
-    pub fn new(renderer: T) -> Result<Self, ErrorKind> {
-        let text_context = Rc::new(RefCell::new(TextContextImpl::default()));
-        let glyph_atlas = Rc::new(GlyphAtlas::new(&text_context));
-        let mut canvas = Self {
-            width: 0,
-            height: 0,
-            renderer,
-            text_context,
-            glyph_atlas,
-            ephemeral_glyph_atlas: None,
-            current_render_target: RenderTarget::Screen,
-            state_stack: Vec::new(),
-            commands: Vec::new(),
-            verts: Vec::new(),
-            images: ImageStore::new(),
-            fringe_width: 1.0,
-            device_px_ratio: 1.0,
-            tess_tol: 0.25,
-            dist_tol: 0.01,
-            gradients: GradientStore::new(),
-            shadow_images: Vec::new(),
-        };
-
-        canvas.save();
-
-        Ok(canvas)
-    }
-
     pub fn new_with_text_context(renderer: T, text_context: TextContext) -> Result<Self, ErrorKind> {
         let glyph_atlas = Rc::new(GlyphAtlas::new(&text_context.0));
         let mut canvas = Self {
@@ -261,18 +224,15 @@ where
             renderer,
             text_context: text_context.0,
             glyph_atlas,
-            ephemeral_glyph_atlas: None,
             current_render_target: RenderTarget::Screen,
             state_stack: Vec::new(),
             commands: Vec::new(),
             verts: Vec::new(),
             images: ImageStore::new(),
             fringe_width: 1.0,
-            device_px_ratio: 1.0,
             tess_tol: 0.25,
             dist_tol: 0.01,
             gradients: GradientStore::new(),
-            shadow_images: Vec::new(),
         };
 
         canvas.save();
@@ -286,7 +246,6 @@ where
         self.fringe_width = 1.0;
         self.tess_tol = 0.25 / dpi;
         self.dist_tol = 0.01 / dpi;
-        self.device_px_ratio = dpi;
 
         self.renderer.set_size(width, height, dpi);
 
@@ -346,10 +305,6 @@ where
         self.verts.clear();
         self.gradients
             .release_old_gradients(&mut self.images, &mut self.renderer);
-        self.release_shadow_images();
-        if let Some(atlas) = self.ephemeral_glyph_atlas.take() {
-            atlas.clear(self);
-        }
         command_buffer
     }
 
@@ -635,22 +590,6 @@ where
         }
     }
 
-    pub fn contains_point(&self, path: &Path, x: f32, y: f32, fill_rule: FillRule) -> bool {
-        let transform = self.state().transform;
-
-        let path_cache = path.cache(&transform, self.tess_tol, self.dist_tol);
-
-        if path_cache.bounds.maxx < 0.0
-            || path_cache.bounds.minx > self.width() as f32
-            || path_cache.bounds.maxy < 0.0
-            || path_cache.bounds.miny > self.height() as f32
-        {
-            return false;
-        }
-
-        path_cache.contains_point(x, y, fill_rule)
-    }
-
     pub fn fill_path(&mut self, path: &Path, paint: &Paint) {
         self.fill_path_internal(path, &paint.flavor, paint.shape_anti_alias, paint.fill_rule);
     }
@@ -661,20 +600,6 @@ where
 
         let canvas_width = self.width();
         let canvas_height = self.height();
-
-        if self.shadow_enabled() {
-            let bounds = {
-                let cache = path.cache(&transform, self.tess_tol, self.dist_tol);
-                cache.bounds
-            };
-            if self.shadow_could_be_visible(bounds) {
-                let path = path.clone();
-                let shadow_flavor = paint_flavor.clone();
-                self.render_shadow(bounds, move |canvas| {
-                    canvas.fill_path_internal(&path, &shadow_flavor, anti_alias, fill_rule);
-                });
-            }
-        }
 
         let mut path_cache = path.cache(&transform, self.tess_tol, self.dist_tol);
 
@@ -824,40 +749,6 @@ where
         let mut paint_flavor = paint_flavor.clone();
         let transform = self.state().transform;
 
-        if !stroke.line_dash.is_empty() {
-            let dashed_path = path.dashed_with_tolerance(&stroke.line_dash, stroke.line_dash_offset, self.tess_tol);
-            if dashed_path.is_empty() {
-                return;
-            }
-
-            let mut solid_stroke = stroke.clone();
-            solid_stroke.line_dash.clear();
-            solid_stroke.line_dash_offset = 0.0;
-            self.stroke_path_internal(&dashed_path, &paint_flavor, anti_alias, &solid_stroke);
-            return;
-        }
-
-        if self.shadow_enabled() {
-            let centerline = {
-                let cache = path.cache(&transform, self.tess_tol, self.dist_tol);
-                cache.bounds
-            };
-            let half = (stroke.line_width * transform.average_scale()).max(self.fringe_width) * 0.5;
-            let mut bounds = centerline;
-            bounds.minx -= half;
-            bounds.miny -= half;
-            bounds.maxx += half;
-            bounds.maxy += half;
-            if self.shadow_could_be_visible(bounds) {
-                let path = path.clone();
-                let stroke = stroke.clone();
-                let shadow_flavor = paint_flavor.clone();
-                self.render_shadow(bounds, move |canvas| {
-                    canvas.stroke_path_internal(&path, &shadow_flavor, anti_alias, &stroke);
-                });
-            }
-        }
-
         let mut path_cache = path.cache(&transform, self.tess_tol, self.dist_tol);
 
         if path_cache.bounds.maxx < 0.0
@@ -903,27 +794,21 @@ where
             -1.0,
         );
 
-        let flavor = if stroke.stencil_strokes {
-            let params2 = Params::new(
-                &self.images,
-                &transform,
-                &paint_flavor,
-                &GlyphTexture::default(),
-                &scissor,
-                line_width,
-                self.fringe_width,
-                1.0 - 0.5 / 255.0,
-            );
+        let params2 = Params::new(
+            &self.images,
+            &transform,
+            &paint_flavor,
+            &GlyphTexture::default(),
+            &scissor,
+            line_width,
+            self.fringe_width,
+            1.0 - 0.5 / 255.0,
+        );
 
-            CommandType::StencilStroke {
-                params1: params,
-                params2,
-            }
-        } else {
-            CommandType::Stroke { params }
-        };
-
-        let mut cmd = Command::new(flavor);
+        let mut cmd = Command::new(CommandType::StencilStroke {
+            params1: params,
+            params2,
+        });
         cmd.composite_operation = self.state().composite_operation;
 
         if let PaintFlavor::Image { id, .. } = paint_flavor {
@@ -951,131 +836,6 @@ where
         }
 
         self.append_cmd(cmd);
-    }
-
-    fn shadow_enabled(&self) -> bool {
-        let state = self.state();
-        state.shadow_color.a > 0.0
-            && (state.shadow_blur != 0.0 || state.shadow_offset[0] != 0.0 || state.shadow_offset[1] != 0.0)
-    }
-
-    fn shadow_could_be_visible(&self, shape_bounds: Bounds) -> bool {
-        let state = self.state();
-        let [ox, oy] = state.shadow_offset;
-        let spread = (state.shadow_blur / 2.0 * 3.0).ceil();
-        let minx = shape_bounds.minx + ox - spread;
-        let miny = shape_bounds.miny + oy - spread;
-        let maxx = shape_bounds.maxx + ox + spread;
-        let maxy = shape_bounds.maxy + oy + spread;
-        maxx >= 0.0 && minx <= self.width() as f32 && maxy >= 0.0 && miny <= self.height() as f32
-    }
-
-    fn render_shadow(&mut self, shape_bounds: Bounds, draw_coverage: impl FnOnce(&mut Self)) {
-        if shape_bounds.maxx <= shape_bounds.minx || shape_bounds.maxy <= shape_bounds.miny {
-            return;
-        }
-
-        let state = *self.state();
-        let shadow_color = state.shadow_color;
-
-        let sigma = state.shadow_blur / 2.0;
-
-        let [txx, txy] = state.shadow_offset;
-
-        let pad = (sigma * 3.0).ceil() + 2.0;
-
-        let minx = (shape_bounds.minx - pad).floor();
-        let miny = (shape_bounds.miny - pad).floor();
-        let maxx = (shape_bounds.maxx + pad).ceil();
-        let maxy = (shape_bounds.maxy + pad).ceil();
-
-        let width = (maxx - minx) as usize;
-        let height = (maxy - miny) as usize;
-
-        if width == 0 || height == 0 || width > 8192 || height > 8192 {
-            return;
-        }
-
-        let image_flags = ImageFlags::PREMULTIPLIED | ImageFlags::FLIP_Y;
-        let Ok(coverage_image) = self.create_image_empty(width, height, PixelFormat::Rgba8, image_flags) else {
-            return;
-        };
-        let blurred_image = if sigma >= 0.01 {
-            match self.create_image_empty(width, height, PixelFormat::Rgba8, image_flags) {
-                Ok(image) => Some(image),
-                Err(_) => {
-                    self.delete_image(coverage_image);
-                    return;
-                }
-            }
-        } else {
-            None
-        };
-
-        let previous_target = self.current_render_target;
-
-        self.save();
-        self.set_render_target(RenderTarget::Image(coverage_image));
-        self.clear_rect(0, 0, width as u32, height as u32, Color::rgbaf(0.0, 0.0, 0.0, 0.0));
-
-        let mut coverage_transform = Transform2D::translation(-minx, -miny);
-        coverage_transform.premultiply(&state.transform);
-        self.state_mut().transform = coverage_transform;
-        self.state_mut().alpha = 1.0;
-        self.state_mut().scissor = Scissor::default();
-        self.state_mut().composite_operation = CompositeOperationState::default();
-        self.state_mut().shadow_color = Color::rgbaf(0.0, 0.0, 0.0, 0.0);
-
-        draw_coverage(self);
-
-        self.state_mut().transform = Transform2D::identity();
-        self.state_mut().composite_operation = CompositeOperationState::new(CompositeOperation::SourceIn);
-        let mut mask_rect = Path::new();
-        mask_rect.rect(0.0, 0.0, width as f32, height as f32);
-        self.fill_path_internal(&mask_rect, &PaintFlavor::Color(shadow_color), false, FillRule::NonZero);
-
-        self.restore();
-
-        let source_image = if let Some(blurred_image) = blurred_image {
-            self.filter_image(blurred_image, ImageFilter::GaussianBlur { sigma }, coverage_image);
-            blurred_image
-        } else {
-            coverage_image
-        };
-
-        self.set_render_target(previous_target);
-
-        let dst_x = minx + txx;
-        let dst_y = miny + txy;
-
-        let tint = Color::rgbaf(1.0, 1.0, 1.0, state.alpha);
-        let mut shadow_paint = Paint::image_tint(source_image, dst_x, dst_y, width as f32, height as f32, 0.0, tint);
-        shadow_paint.set_anti_alias(false);
-
-        let saved_transform = self.state().transform;
-        let saved_alpha = self.state().alpha;
-        self.state_mut().transform = Transform2D::identity();
-        self.state_mut().alpha = 1.0;
-        self.state_mut().shadow_color = Color::rgbaf(0.0, 0.0, 0.0, 0.0);
-
-        let mut shadow_rect = Path::new();
-        shadow_rect.rect(dst_x, dst_y, width as f32, height as f32);
-        self.fill_path_internal(&shadow_rect, &shadow_paint.flavor, false, FillRule::NonZero);
-
-        self.state_mut().transform = saved_transform;
-        self.state_mut().alpha = saved_alpha;
-        self.state_mut().shadow_color = shadow_color;
-
-        self.shadow_images.push(coverage_image);
-        if let Some(blurred_image) = blurred_image {
-            self.shadow_images.push(blurred_image);
-        }
-    }
-
-    fn release_shadow_images(&mut self) {
-        for id in std::mem::take(&mut self.shadow_images) {
-            self.images.remove(&mut self.renderer, id);
-        }
     }
 
     fn render_unclipped_image_blit(&mut self, target_rect: &Rect, transform: &Transform2D, paint_flavor: &PaintFlavor) {
@@ -1254,37 +1014,17 @@ where
             return Err(ErrorKind::NoFontFound);
         };
 
-        let font_face = font.face_ref_with_normalized_coords(normalized_coords);
-
-        let mut color_glyphs = Vec::new();
-
-        let glyphs_it = glyphs.into_iter();
-        let non_color_glyphs = glyphs_it
-            .filter(|glyph| {
-                if font
-                    .glyph(&font_face, glyph.glyph_id, normalized_coords)
-                    .is_some_and(|glyph| glyph.path.is_none())
-                {
-                    color_glyphs.push(glyph.clone());
-
-                    false
-                } else {
-                    true
-                }
-            })
-            .collect::<Vec<_>>();
-
-        let scaled = |g: &PositionedGlyph| PositionedGlyph {
+        let scaled = |g: PositionedGlyph| PositionedGlyph {
             x: g.x * effective_scale,
             y: g.y * effective_scale,
             glyph_id: g.glyph_id,
         };
 
-        let mut draw_commands = if need_direct_rendering {
+        let draw_commands = if need_direct_rendering {
             text::render_direct(
                 self,
                 font,
-                non_color_glyphs.into_iter(),
+                glyphs.into_iter(),
                 &paint.flavor,
                 paint.shape_anti_alias,
                 &stroke,
@@ -1298,55 +1038,13 @@ where
                 self,
                 font_id,
                 font,
-                &font_face,
-                non_color_glyphs.iter().map(scaled),
+                glyphs.into_iter().map(scaled),
                 effective_font_size,
                 stroke.line_width,
                 render_mode,
                 normalized_coords,
             )?
         };
-
-        if !color_glyphs.is_empty() {
-            let color_commands = {
-                let atlas = if need_direct_rendering {
-                    self.ephemeral_glyph_atlas
-                        .get_or_insert_with(|| Rc::new(GlyphAtlas::new(&self.text_context)))
-                        .clone()
-                } else {
-                    self.glyph_atlas.clone()
-                };
-
-                if need_direct_rendering {
-                    atlas.render_atlas(
-                        self,
-                        font_id,
-                        font,
-                        &font_face,
-                        color_glyphs.into_iter(),
-                        paint.text.font_size,
-                        stroke.line_width,
-                        render_mode,
-                        normalized_coords,
-                    )?
-                } else {
-                    atlas.render_atlas(
-                        self,
-                        font_id,
-                        font,
-                        &font_face,
-                        color_glyphs.iter().map(scaled),
-                        effective_font_size,
-                        stroke.line_width,
-                        render_mode,
-                        normalized_coords,
-                    )?
-                }
-            };
-
-            draw_commands.alpha_glyphs.extend(color_commands.alpha_glyphs);
-            draw_commands.color_glyphs.extend(color_commands.color_glyphs);
-        }
 
         match rasterization {
             Rasterization::ScaledAtlas {

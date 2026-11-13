@@ -32,9 +32,6 @@ pub enum CommandType {
         stencil_params: Params,
         fill_params: Params,
     },
-    Stroke {
-        params: Params,
-    },
     StencilStroke {
         params1: Params,
         params2: Params,
@@ -125,10 +122,6 @@ impl Vertex {
 
     pub fn new(x: f32, y: f32, u: f32, v: f32) -> Self {
         Self { x, y, u, v }
-    }
-
-    pub fn set(&mut self, x: f32, y: f32, u: f32, v: f32) {
-        *self = Self { x, y, u, v };
     }
 }
 

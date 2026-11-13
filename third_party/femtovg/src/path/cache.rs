@@ -5,7 +5,7 @@ use bitflags::bitflags;
 use crate::{
     geometry::{Bounds, Position, Transform2D, Vector},
     renderer::Vertex,
-    FillRule, LineCap, LineJoin, Solidity,
+    LineCap, LineJoin, Solidity,
 };
 
 use super::Verb;
@@ -36,11 +36,6 @@ impl Point {
             flags,
             ..Default::default()
         }
-    }
-
-    pub fn is_left(p0: &Self, p1: &Self, x: f32, y: f32) -> f32 {
-        let pos = Position { x, y };
-        (p1.pos - p0.pos).dot((pos - p0.pos).orthogonal())
     }
 
     pub fn approx_eq(&self, other: &Self, tolerance: f32) -> bool {
@@ -340,50 +335,6 @@ impl PathCache {
             tess_tol,
             dist_tol,
         );
-    }
-
-    pub fn contains_point(&self, x: f32, y: f32, fill_rule: FillRule) -> bool {
-        if !self.bounds.contains(x, y) {
-            return false;
-        }
-
-        if fill_rule == FillRule::EvenOdd {
-            for contour in &self.contours {
-                let mut crossing = false;
-
-                for (p0, p1) in contour.point_pairs(&self.points) {
-                    if (p1.pos.y > y) != (p0.pos.y > y)
-                        && (x < (p0.pos.x - p1.pos.x) * (y - p1.pos.y) / (p0.pos.y - p1.pos.y) + p1.pos.x)
-                    {
-                        crossing = !crossing;
-                    }
-                }
-
-                if crossing {
-                    return true;
-                }
-            }
-        } else {
-            for contour in &self.contours {
-                let mut winding_number: i32 = 0;
-
-                for (p0, p1) in contour.point_pairs(&self.points) {
-                    if p0.pos.y <= y {
-                        if p1.pos.y > y && Point::is_left(p0, p1, x, y) > 0.0 {
-                            winding_number = winding_number.wrapping_add(1);
-                        }
-                    } else if p1.pos.y <= y && Point::is_left(p0, p1, x, y) < 0.0 {
-                        winding_number = winding_number.wrapping_sub(1);
-                    }
-                }
-
-                if winding_number != 0 {
-                    return true;
-                }
-            }
-        }
-
-        false
     }
 
     pub(crate) fn expand_fill(&mut self, fringe_width: f32, line_join: LineJoin, miter_limit: f32) {

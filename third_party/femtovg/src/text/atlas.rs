@@ -26,10 +26,6 @@ impl Atlas {
         (self.width, self.height)
     }
 
-    pub fn reset(&mut self, width: usize, height: usize) {
-        *self = Self::new(width, height);
-    }
-
     pub fn add_rect(&mut self, rect_width: usize, rect_height: usize) -> Option<(usize, usize)> {
         let mut besth = self.height;
         let mut bestw = self.width;
