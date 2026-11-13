@@ -100,14 +100,26 @@ fn finish(c: &Ctx, id: &str, result: std::io::Result<()>) {
     match result {
         Ok(()) if id == "tray" => {
             let c2 = c.clone();
-            confirm(c, i18n::get("tools.restart.title"), i18n::get("tools.restart.text"), i18n::get("tools.restart.btn"), true, Box::new(move || {
-                tools::restart_pc();
-                toast(&c2, i18n::get("tools.done"));
-            }));
+            confirm(c, i18n::get("tools.restart.title"), i18n::get("tools.restart.text"), i18n::get("tools.restart.btn"), true, Box::new(move || restart(&c2)));
         }
         Ok(()) => toast(c, i18n::get("tools.done")),
         Err(e) => show_error(c, error_text(&e)),
     }
+}
+
+fn restart(c: &Ctx) {
+    let weak = c.weak.clone();
+    let core = c.core.clone();
+    crate::engine::pool::spawn(move || {
+        let result = tools::restart_pc();
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let c = Ctx::new(ui.as_weak(), core);
+            match result {
+                Ok(()) => toast(&c, i18n::get("tools.done")),
+                Err(e) => show_error(&c, error_text(&e)),
+            }
+        });
+    });
 }
 
 fn start(c: &Ctx, id: &'static str) {

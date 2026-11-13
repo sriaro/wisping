@@ -375,6 +375,10 @@ fn run_tool(id: &str, backup_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn restart_pc() {
-    let _ = sys::hidden("shutdown.exe").args(["/r", "/t", "20"]).output();
+pub fn restart_pc() -> io::Result<()> {
+    let out = sys::hidden("shutdown.exe").args(["/r", "/t", "20"]).output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    Err(sys::command_failure(if out.stderr.is_empty() { &out.stdout } else { &out.stderr }))
 }
